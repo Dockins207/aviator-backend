@@ -27,8 +27,12 @@ class GameSocketService {
   private baseUrl: string;
 
   constructor() {
-    // Use environment variable or default to backend's address
-    this.baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    // Ensure backend URL is set, throw an error if not
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+    if (!backendUrl) {
+      throw new Error('NEXT_PUBLIC_BACKEND_URL is not set. Please configure the backend URL in your .env file.');
+    }
+    this.baseUrl = backendUrl;
   }
 
   // Connect to WebSocket
