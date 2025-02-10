@@ -64,25 +64,15 @@ class GameBoardService {
 
   // Start betting phase with 5-second countdown
   startBettingPhase() {
-    // Generate and log crash point
-    this.gameState.crashPoint = gameUtils.generateCrashPoint();
-    
-    // Set initial countdown to 5
+    // Set betting state
+    this.gameState.status = 'betting';
     this.gameState.countdown = 5;
-
-    console.log(`🎲 Betting Phase Started`);
-    console.log(`Game ID: ${this.gameState.gameId}`);
-    console.log(`Crash Point: ${gameUtils.formatMultiplier(this.gameState.crashPoint)}x`);
-    console.log(`Betting Countdown: 5 seconds`);
 
     // Start countdown
     return new Promise((resolve) => {
       this.countdownInterval = setInterval(() => {
         // Decrease countdown
         this.gameState.countdown--;
-
-        // Real-time countdown logging
-        console.log(`Betting Countdown: ${this.gameState.countdown} seconds`);
 
         // Check if countdown is complete
         if (this.gameState.countdown <= 0) {
@@ -102,9 +92,6 @@ class GameBoardService {
     this.gameState.startTime = Date.now();
     this.gameState.multiplier = 1.00;
 
-    console.log(`\n🚀 Flying Phase Started 🚀`);
-    console.log(`Initial Multiplier: ${gameUtils.formatMultiplier(this.gameState.multiplier)}x`);
-
     // Start multiplier progression
     return new Promise((resolve) => {
       this.multiplierInterval = setInterval(() => {
@@ -114,9 +101,6 @@ class GameBoardService {
             this.gameState.multiplier, 
             this.gameState.crashPoint
           );
-          
-          // Real-time multiplier logging
-          console.log(`+0.01 Multiplier: ${gameUtils.formatMultiplier(this.gameState.multiplier)}x`);
           
           // Check if game has crashed (exactly at crash point)
           if (this.gameState.multiplier === this.gameState.crashPoint) {
@@ -139,9 +123,6 @@ class GameBoardService {
     
     // Ensure final multiplier matches the crash point exactly
     this.gameState.multiplier = this.gameState.crashPoint;
-    
-    // Log crashed state with final multiplier
-    console.log(`💥 CRASHES @ ${gameUtils.formatMultiplier(this.gameState.multiplier)}x`);
 
     // Save game result to repository
     GameRepository.saveGameResult(this.gameState);

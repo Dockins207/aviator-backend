@@ -53,8 +53,11 @@ class GameSocketService {
   connect(): Socket {
     // If socket already exists and is connected, return it
     if (this.socket && this.socket.connected) {
+      console.log('[SOCKET] Reusing existing socket connection');
       return this.socket;
     }
+
+    console.log('[SOCKET] Attempting to connect to:', this.baseUrl);
 
     // Create new socket connection
     this.socket = io(this.baseUrl, {
@@ -76,7 +79,6 @@ class GameSocketService {
       console.log('Connected to:', this.baseUrl);
       console.log('Socket ID:', this.socket?.id);
       console.log('Connection Timestamp:', new Date().toISOString());
-      console.log('Socket Options:', JSON.stringify(this.socket?.io.opts, null, 2));
       console.groupEnd();
     });
 
@@ -84,8 +86,7 @@ class GameSocketService {
     this.socket.on('connect_error', (error) => {
       console.error('[SOCKET] Connection Error:', {
         message: error.message,
-        name: error.name,
-        stack: error.stack
+        name: error.name
       });
     });
 

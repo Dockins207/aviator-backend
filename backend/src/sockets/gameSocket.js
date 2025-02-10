@@ -8,13 +8,20 @@ class GameSocket {
     // Initialize Socket.IO server
     this.io = new Server(httpServer, {
       cors: {
-        origin: process.env.FRONTEND_URL || '*',
+        origin: '*', // Allow all origins
         methods: ['GET', 'POST']
       }
     });
 
     // Game state broadcast interval
     this.gameStateBroadcastInterval = null;
+
+    // Log socket server initialization
+    console.log('[SOCKET] Socket server initialized');
+    console.log('[SOCKET] CORS Configuration:', { 
+      origin: this.io.corsOptions?.origin || 'undefined', 
+      methods: ['GET', 'POST'] 
+    });
 
     // Initialize socket connection
     this.initializeSocket();
@@ -79,43 +86,27 @@ class GameSocket {
     gameService.startGameCycle();
 
     // Broadcast game states in real-time
+    let lastLoggedGameState = null;
+    let gameIdLogged = false;
+    let crashPointLogged = false;
     this.gameStateBroadcastInterval = setInterval(() => {
       try {
         const currentGameState = gameService.getCurrentGameState();
         
-        // Detailed logging of game state
-        console.group('[GAME] Game State Broadcast');
-        console.log('Current Game State:', JSON.stringify({
-          status: currentGameState.status,
-          gameId: currentGameState.gameId,
-          multiplier: currentGameState.multiplier,
-          countdown: currentGameState.countdown,
-          crashPoint: currentGameState.crashPoint,
-          players: currentGameState.players.length
-        }, null, 2));
-        
-        // Log number of connected clients
-        const connectedClients = this.io.engine.clientsCount;
-        console.log(`Connected Clients: ${connectedClients}`);
-        
-        // Broadcast different states with additional logging
+        // Broadcast different states
         switch(currentGameState.status) {
           case 'betting':
-            console.log('Initiating Betting Phase Broadcast');
             this.broadcastBettingPhase(currentGameState);
             break;
           case 'flying':
-            console.log('Initiating Flying Phase Broadcast');
             this.broadcastFlyingPhase(currentGameState);
             break;
           case 'crashed':
-            console.log('Initiating Crashed Phase Broadcast');
             this.broadcastCrashedPhase(currentGameState);
             break;
           default:
-            console.warn('Unknown game state:', currentGameState.status);
+            console.warn('[GAME] Unknown game state:', currentGameState.status);
         }
-        console.groupEnd();
       } catch (error) {
         console.error('[GAME] Error in game state broadcast:', error);
       }
@@ -127,58 +118,39 @@ class GameSocket {
   }
 
   broadcastBettingPhase(gameState) {
-    console.log('Broadcasting Betting Phase');
-    try {
-      this.io.emit('gameStateUpdate', {
-        status: 'betting',
-        gameId: gameState.gameId,
-        countdown: gameState.countdown,
-        crashPoint: gameUtils.formatMultiplier(gameState.crashPoint),
-        players: gameState.players.map(player => ({
-          id: player.id,
-          betAmount: player.betAmount
-        }))
-      });
-    } catch (error) {
-      console.error('Error broadcasting betting phase:', error);
-    }
+    // Broadcast betting phase without logging
+    this.io.emit('gameStateUpdate', {
+      status: 'betting',
+      gameId: gameState.gameId,
+      multiplier: gameState.multiplier,
+      countdown: gameState.countdown,
+      crashPoint: gameState.crashPoint,
+      players: gameState.players.length
+    });
   }
 
   broadcastFlyingPhase(gameState) {
-    console.log('Broadcasting Flying Phase');
-    try {
-      this.io.emit('gameStateUpdate', {
-        status: 'flying',
-        gameId: gameState.gameId,
-        multiplier: gameUtils.formatMultiplier(gameState.multiplier),
-        startTime: gameState.startTime,
-        players: gameState.players.map(player => ({
-          id: player.id,
-          betAmount: player.betAmount,
-          potentialWinnings: this.calculatePotentialWinnings(player, gameState.multiplier)
-        }))
-      });
-    } catch (error) {
-      console.error('Error broadcasting flying phase:', error);
-    }
+    // Broadcast flying phase without logging
+    this.io.emit('gameStateUpdate', {
+      status: 'flying',
+      gameId: gameState.gameId,
+      multiplier: gameState.multiplier,
+      countdown: gameState.countdown,
+      crashPoint: gameState.crashPoint,
+      players: gameState.players.length
+    });
   }
 
   broadcastCrashedPhase(gameState) {
-    console.log('Broadcasting Crashed Phase');
-    try {
-      this.io.emit('gameStateUpdate', {
-        status: 'crashed',
-        gameId: gameState.gameId,
-        crashPoint: gameUtils.formatMultiplier(gameState.crashPoint),
-        players: gameState.players.map(player => ({
-          id: player.id,
-          betAmount: player.betAmount,
-          result: this.calculatePlayerResult(player, gameState.crashPoint)
-        }))
-      });
-    } catch (error) {
-      console.error('Error broadcasting crashed phase:', error);
-    }
+    // Broadcast crashed phase without logging
+    this.io.emit('gameStateUpdate', {
+      status: 'crashed',
+      gameId: gameState.gameId,
+      multiplier: gameState.multiplier,
+      countdown: gameState.countdown,
+      crashPoint: gameState.crashPoint,
+      players: gameState.players.length
+    });
   }
 
   handlePlayerJoin(socket, playerData) {
