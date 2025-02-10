@@ -84,7 +84,8 @@ class GameSocket {
         const currentGameState = gameService.getCurrentGameState();
         
         // Detailed logging of game state
-        console.log('[GAME] Current Game State:', JSON.stringify({
+        console.group('[GAME] Game State Broadcast');
+        console.log('Current Game State:', JSON.stringify({
           status: currentGameState.status,
           gameId: currentGameState.gameId,
           multiplier: currentGameState.multiplier,
@@ -95,22 +96,26 @@ class GameSocket {
         
         // Log number of connected clients
         const connectedClients = this.io.engine.clientsCount;
-        console.log(`[SOCKET] Connected Clients: ${connectedClients}`);
+        console.log(`Connected Clients: ${connectedClients}`);
         
-        // Broadcast different states
+        // Broadcast different states with additional logging
         switch(currentGameState.status) {
           case 'betting':
+            console.log('Initiating Betting Phase Broadcast');
             this.broadcastBettingPhase(currentGameState);
             break;
           case 'flying':
+            console.log('Initiating Flying Phase Broadcast');
             this.broadcastFlyingPhase(currentGameState);
             break;
           case 'crashed':
+            console.log('Initiating Crashed Phase Broadcast');
             this.broadcastCrashedPhase(currentGameState);
             break;
           default:
-            console.warn('[GAME] Unknown game state:', currentGameState.status);
+            console.warn('Unknown game state:', currentGameState.status);
         }
+        console.groupEnd();
       } catch (error) {
         console.error('[GAME] Error in game state broadcast:', error);
       }
@@ -124,7 +129,7 @@ class GameSocket {
   broadcastBettingPhase(gameState) {
     console.log('Broadcasting Betting Phase');
     try {
-      this.io.emit('game_state', {
+      this.io.emit('gameStateUpdate', {
         status: 'betting',
         gameId: gameState.gameId,
         countdown: gameState.countdown,
@@ -142,7 +147,7 @@ class GameSocket {
   broadcastFlyingPhase(gameState) {
     console.log('Broadcasting Flying Phase');
     try {
-      this.io.emit('game_state', {
+      this.io.emit('gameStateUpdate', {
         status: 'flying',
         gameId: gameState.gameId,
         multiplier: gameUtils.formatMultiplier(gameState.multiplier),
@@ -161,7 +166,7 @@ class GameSocket {
   broadcastCrashedPhase(gameState) {
     console.log('Broadcasting Crashed Phase');
     try {
-      this.io.emit('game_state', {
+      this.io.emit('gameStateUpdate', {
         status: 'crashed',
         gameId: gameState.gameId,
         crashPoint: gameUtils.formatMultiplier(gameState.crashPoint),

@@ -40,6 +40,13 @@ class GameSocketService {
       'http://localhost:8000',
       'http://127.0.0.1:8000'
     ];
+
+    // Log backend URLs for debugging
+    console.group('[SOCKET] Backend URL Configuration');
+    console.log('Selected Backend URL:', this.baseUrl);
+    console.log('Fallback URLs:', this.backendUrls);
+    console.log('Environment Backend URL:', process.env.NEXT_PUBLIC_BACKEND_URL);
+    console.groupEnd();
   }
 
   // Connect to WebSocket
@@ -51,11 +58,12 @@ class GameSocketService {
 
     // Create new socket connection
     this.socket = io(this.baseUrl, {
-      transports: ['websocket'],
+      transports: ['websocket', 'polling'],  // Add polling as fallback
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 10000,
+      forceNew: true,  // Always create a new connection
       extraHeaders: {
         'X-Client-Timestamp': Date.now().toString(),
         'X-Client-Version': '1.0.0'
@@ -65,10 +73,25 @@ class GameSocketService {
     // Enhanced connection logging
     this.socket.on('connect', () => {
       console.group('[SOCKET] Connection Established');
-      console.log('Connected to:', this.socket?.io.opts.host);
+      console.log('Connected to:', this.baseUrl);
       console.log('Socket ID:', this.socket?.id);
       console.log('Connection Timestamp:', new Date().toISOString());
+      console.log('Socket Options:', JSON.stringify(this.socket?.io.opts, null, 2));
       console.groupEnd();
+    });
+
+    // Detailed connection error handling
+    this.socket.on('connect_error', (error) => {
+      console.error('[SOCKET] Connection Error:', {
+        message: error.message,
+        name: error.name,
+        stack: error.stack
+      });
+    });
+
+    // Connection timeout handling
+    this.socket.on('connect_timeout', () => {
+      console.error('[SOCKET] Connection Timeout');
     });
 
     return this.socket;

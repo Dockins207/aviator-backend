@@ -56,29 +56,34 @@ const httpServer = createServer(expressApp);
 const io = new SocketIOServer(httpServer, {
   cors: {
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
+      console.log('[SOCKET] Incoming Connection Origin:', origin);
       
-      // Define allowed origins
+      // Define allowed origins with more logging
       const allowedOrigins = [
         'http://localhost:3000', 
         'http://127.0.0.1:3000', 
         'http://192.168.0.10:3000',
         'http://192.168.0.12:3000',
-        process.env.FRONTEND_URL
+        process.env.FRONTEND_URL,
+        '*'  // Be very permissive for debugging
       ];
       
-      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      console.log('[SOCKET] Allowed Origins:', allowedOrigins);
+      
+      if (allowedOrigins.includes(origin) || !origin) {
         callback(null, true);
       } else {
+        console.warn('[SOCKET] Blocked connection from:', origin);
         callback(new Error('Not allowed by CORS'));
       }
     },
-    methods: ['GET', 'POST'],
-    credentials: true
+    methods: ['GET', 'POST', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Client-Timestamp', 'X-Client-Version']
   },
   pingTimeout: SOCKET_PING_TIMEOUT,
-  pingInterval: SOCKET_PING_INTERVAL
+  pingInterval: SOCKET_PING_INTERVAL,
+  maxHttpBufferSize: 1e8  // Increase buffer size
 });
 
 // Initialize WebSocket
