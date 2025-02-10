@@ -25,35 +25,51 @@ export interface GameState {
 class GameSocketService {
   private socket: Socket | null = null;
   private baseUrl: string;
+  private backendUrls: string[];
 
   constructor() {
     // Ensure backend URL is set, throw an error if not
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://192.168.0.12:8000';
     if (!backendUrl) {
       throw new Error('NEXT_PUBLIC_BACKEND_URL is not set. Please configure the backend URL in your .env file.');
     }
     this.baseUrl = backendUrl;
+    this.backendUrls = [
+      this.baseUrl,
+      'http://192.168.0.12:8000',
+      'http://localhost:8000',
+      'http://127.0.0.1:8000'
+    ];
   }
 
   // Connect to WebSocket
-  connect() {
-    if (!this.socket) {
-      this.socket = io(this.baseUrl, {
-        transports: ['websocket'],
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000
-      });
-
-      // Log connection events
-      this.socket.on('connect', () => {
-        console.log('Connected to game socket');
-      });
-
-      this.socket.on('disconnect', (reason) => {
-        console.log('Disconnected from game socket:', reason);
-      });
+  connect(): Socket {
+    // If socket already exists and is connected, return it
+    if (this.socket && this.socket.connected) {
+      return this.socket;
     }
+
+    // Create new socket connection
+    this.socket = io(this.baseUrl, {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 10000,
+      extraHeaders: {
+        'X-Client-Timestamp': Date.now().toString(),
+        'X-Client-Version': '1.0.0'
+      }
+    });
+
+    // Enhanced connection logging
+    this.socket.on('connect', () => {
+      console.group('[SOCKET] Connection Established');
+      console.log('Connected to:', this.socket?.io.opts.host);
+      console.log('Socket ID:', this.socket?.id);
+      console.log('Connection Timestamp:', new Date().toISOString());
+      console.groupEnd();
+    });
 
     return this.socket;
   }
@@ -66,42 +82,103 @@ class GameSocketService {
     }
   }
 
+  // Ensure socket is connected before performing actions
+  private ensureSocketConnected(): Socket {
+    if (!this.socket) {
+      this.connect();
+    }
+    return this.socket!;
+  }
+
   // Join game
   joinGame(playerData: Partial<Player>) {
-    this.socket?.emit('join_game', playerData);
+    const socket = this.ensureSocketConnected();
+    console.group('[SOCKET] Join Game');
+    console.log('Player Data:', JSON.stringify(playerData, null, 2));
+    console.groupEnd();
+    socket.emit('joinGame', playerData);
   }
 
   // Place bet
   placeBet(betData: { betAmount: number }) {
-    this.socket?.emit('place_bet', betData);
+    const socket = this.ensureSocketConnected();
+    console.group('[SOCKET] Place Bet');
+    console.log('Bet Data:', JSON.stringify(betData, null, 2));
+    console.groupEnd();
+    socket.emit('placeBet', betData);
   }
 
   // Cash out
   cashOut() {
-    this.socket?.emit('cash_out');
+    const socket = this.ensureSocketConnected();
+    console.group('[SOCKET] Cash Out');
+    console.log('Cash Out Request');
+    console.groupEnd();
+    socket.emit('cashOut');
   }
 
   // Listen for game state updates
   onGameStateUpdate(callback: (gameState: GameState) => void) {
-    this.socket?.on('game_state', callback);
+    const socket = this.ensureSocketConnected();
+    socket.on('gameStateUpdate', (gameState: GameState) => {
+      console.group('[SOCKET] Game State Update');
+      console.log('Received Game State:', JSON.stringify(gameState, null, 2));
+      console.log('Game Status:', gameState.status);
+      console.log('Game ID:', gameState.gameId);
+      console.log('Players Count:', gameState.players.length);
+      console.log('Multiplier:', gameState.multiplier);
+      console.log('Crash Point:', gameState.crashPoint);
+      console.groupEnd();
+      
+      // Validate game state before calling callback
+      if (this.validateGameState(gameState)) {
+        callback(gameState);
+      } else {
+        console.warn('[SOCKET] Invalid game state received');
+      }
+    });
   }
 
   // Listen for join game response
   onJoinGameResponse(callback: (response: { success: boolean; message: string }) => void) {
-    this.socket?.on('join_game_success', (data) => callback({ success: true, message: data.message }));
-    this.socket?.on('join_game_error', (data) => callback({ success: false, message: data.message }));
+    const socket = this.ensureSocketConnected();
+    socket.on('joinGameResponse', (response) => {
+      console.group('[SOCKET] Join Game Response');
+      console.log('Success:', response.success);
+      console.log('Message:', response.message);
+      console.groupEnd();
+      callback(response);
+    });
   }
 
   // Listen for bet placement response
   onBetPlacementResponse(callback: (response: { success: boolean; message: string }) => void) {
-    this.socket?.on('place_bet_success', (data) => callback({ success: true, message: data.message }));
-    this.socket?.on('place_bet_error', (data) => callback({ success: false, message: data.message }));
+    const socket = this.ensureSocketConnected();
+    socket.on('betPlacementResponse', (response) => {
+      console.group('[SOCKET] Bet Placement Response');
+      console.log('Success:', response.success);
+      console.log('Message:', response.message);
+      console.groupEnd();
+      callback(response);
+    });
   }
 
   // Listen for cash out response
   onCashOutResponse(callback: (response: { success: boolean; message: string }) => void) {
-    this.socket?.on('cash_out_success', (data) => callback({ success: true, message: data.message }));
-    this.socket?.on('cash_out_error', (data) => callback({ success: false, message: data.message }));
+    const socket = this.ensureSocketConnected();
+    socket.on('cashOutResponse', (response) => {
+      console.group('[SOCKET] Cash Out Response');
+      console.log('Success:', response.success);
+      console.log('Message:', response.message);
+      console.groupEnd();
+      callback(response);
+    });
+  }
+
+  // Validate game state structure
+  private validateGameState(gameState: GameState): boolean {
+    const requiredFields = ['status', 'gameId'];
+    return requiredFields.every(field => gameState.hasOwnProperty(field));
   }
 }
 

@@ -22,9 +22,25 @@ const expressApp = express();
 
 // Flexible CORS configuration
 const corsOptions = {
-  origin: FRONTEND_URL === '*' 
-    ? (origin, callback) => callback(null, true) 
-    : FRONTEND_URL,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Define allowed origins
+    const allowedOrigins = [
+      'http://localhost:3000', 
+      'http://127.0.0.1:3000', 
+      'http://192.168.0.10:3000',
+      'http://192.168.0.12:3000',
+      process.env.FRONTEND_URL
+    ];
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -39,9 +55,25 @@ const httpServer = createServer(expressApp);
 // Initialize Socket.IO with flexible CORS
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: FRONTEND_URL === '*' 
-      ? (origin, callback) => callback(null, true) 
-      : FRONTEND_URL,
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      // Define allowed origins
+      const allowedOrigins = [
+        'http://localhost:3000', 
+        'http://127.0.0.1:3000', 
+        'http://192.168.0.10:3000',
+        'http://192.168.0.12:3000',
+        process.env.FRONTEND_URL
+      ];
+      
+      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -81,10 +113,8 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   logger.info(`Environment: ${NODE_ENV}`);
   logger.info(`Frontend URL: ${FRONTEND_URL}`);
   
-  // Automatically start game cycles
-  setInterval(() => {
-    gameSocket.startGame();
-  }, 30000); // Start a new game every 30 seconds
+  // Use the game cycle from GameSocket
+  gameSocket.startGameCycle();
 });
 
 // Graceful shutdown

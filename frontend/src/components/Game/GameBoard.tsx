@@ -1,10 +1,19 @@
 "use client";
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useGameSocket } from '../../hooks/useGameSocket';
 
 const GameBoard: React.FC = () => {
   const { gameState, isConnected, error } = useGameSocket();
+
+  // Add detailed logging
+  useEffect(() => {
+    console.group('GameBoard State');
+    console.log('Connected:', isConnected);
+    console.log('Game State:', gameState ? JSON.stringify(gameState, null, 2) : 'No game state');
+    console.log('Error:', error);
+    console.groupEnd();
+  }, [gameState, isConnected, error]);
 
   // Determine display color based on game status
   const getStatusColor = () => {
@@ -20,9 +29,24 @@ const GameBoard: React.FC = () => {
     }
   };
 
-  // Format multiplier safely
+  // Format multiplier safely with more robust parsing
   const formatMultiplier = () => {
-    return gameState?.multiplier ? parseFloat(gameState.multiplier).toFixed(2) : '1.00';
+    try {
+      const multiplier = gameState?.multiplier 
+        ? parseFloat(gameState.multiplier) 
+        : 1.00;
+      
+      // Validate multiplier
+      if (isNaN(multiplier)) {
+        console.warn('Invalid multiplier:', gameState?.multiplier);
+        return '1.00';
+      }
+      
+      return multiplier.toFixed(2);
+    } catch (err) {
+      console.error('Error formatting multiplier:', err);
+      return '1.00';
+    }
   };
 
   return (
@@ -50,6 +74,11 @@ const GameBoard: React.FC = () => {
               Crash Point: {gameState.crashPoint}
             </div>
           )}
+          {/* Debug Information */}
+          <div className="mt-4 text-xs text-gray-500">
+            Debug Info:
+            <pre>{JSON.stringify(gameState, null, 2)}</pre>
+          </div>
         </>
       )}
     </div>
