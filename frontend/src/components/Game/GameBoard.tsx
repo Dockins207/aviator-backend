@@ -62,24 +62,9 @@ const GameBoard: React.FC = () => {
           Connecting to game...
         </div>
       ) : (
-        <>
-          <div className={`text-6xl font-bold ${getStatusColor()}`}>
-            {formatMultiplier()}x
-          </div>
-          <div className="mt-4 text-sm text-gray-400">
-            Status: {gameState?.status || 'Waiting'}
-          </div>
-          {gameState?.crashPoint && (
-            <div className="mt-2 text-sm text-gray-300">
-              Crash Point: {gameState.crashPoint}
-            </div>
-          )}
-          {/* Debug Information */}
-          <div className="mt-4 text-xs text-gray-500">
-            Debug Info:
-            <pre>{JSON.stringify(gameState, null, 2)}</pre>
-          </div>
-        </>
+        <div className={`text-6xl font-bold ${getStatusColor()}`}>
+          {formatMultiplier()}x
+        </div>
       )}
     </div>
   );
