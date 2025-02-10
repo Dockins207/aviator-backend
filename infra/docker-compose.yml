@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  # Frontend Admin Service
+  admin-frontend:
+    build:
+      context: ../admin
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE_URL=http://backend:8000/api
+
+  # Frontend Game Service
+  game-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE_URL=http://backend:8000/api
+
+  # Backend Service
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://aviator:aviator_password@postgres:5432/aviator
+      - REDIS_URL=redis://redis:6379
+      - NODE_ENV=development
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=aviator
+      - POSTGRES_USER=aviator
+      - POSTGRES_PASSWORD=aviator_password
+
+  # Redis for Caching and Session Management
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - backend
+      - admin-frontend
+      - game-frontend
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  aviator-network:
+    driver: bridge
