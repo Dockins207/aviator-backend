@@ -1,51 +1,18 @@
-import winston from 'winston';
-
-const levels = {
-  error: 0,
-  warn: 1,
-  info: 2,
-  http: 3,
-  debug: 4,
+const logger = {
+  info: (message) => {
+    console.log(`[INFO] ${new Date().toISOString()}: ${message}`);
+  },
+  error: (message) => {
+    console.error(`[ERROR] ${new Date().toISOString()}: ${message}`);
+  },
+  warn: (message) => {
+    console.warn(`[WARN] ${new Date().toISOString()}: ${message}`);
+  },
+  debug: (message) => {
+    if (process.env.NODE_ENV === 'development') {
+      console.debug(`[DEBUG] ${new Date().toISOString()}: ${message}`);
+    }
+  }
 };
-
-const level = () => {
-  const env = process.env.NODE_ENV || 'development';
-  const isDevelopment = env === 'development';
-  return isDevelopment ? 'debug' : 'warn';
-};
-
-const colors = {
-  error: 'red',
-  warn: 'yellow',
-  info: 'green',
-  http: 'magenta',
-  debug: 'blue',
-};
-
-winston.addColors(colors);
-
-const format = winston.format.combine(
-  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss:ms' }),
-  winston.format.colorize({ all: true }),
-  winston.format.printf(
-    (info) => `${info.timestamp} ${info.level}: ${info.message}`,
-  ),
-);
-
-const transports = [
-  new winston.transports.Console(),
-  new winston.transports.File({
-    filename: 'logs/error.log',
-    level: 'error',
-  }),
-  new winston.transports.File({ filename: 'logs/all.log' }),
-];
-
-const logger = winston.createLogger({
-  level: level(),
-  levels,
-  format,
-  transports,
-});
 
 export default logger;
