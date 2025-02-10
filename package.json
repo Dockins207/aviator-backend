@@ -15,8 +15,7 @@
     "start:backend": "npm run dev -w backend",
     "build": "npm run build -w frontend && npm run build -w backend && npm run build -w admin",
     "test": "npm run test -w frontend && npm run test -w backend",
-    "lint": "npm run lint -w frontend -w backend -w admin",
-    "prepare": "husky install"
+    "lint": "npm run lint -w frontend -w backend -w admin"
   },
   "keywords": [
     "aviator",
@@ -27,9 +26,14 @@
   ],
   "author": "Your Name",
   "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "node-pg-migrate": "^7.9.1"
+  },
   "devDependencies": {
     "concurrently": "^8.2.2",
-    "husky": "^9.0.11",
     "npm-run-all": "^4.1.5"
   },
   "engines": {

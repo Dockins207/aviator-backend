@@ -1,5 +1,3 @@
-const GameBoardService = require('../services/gameBoardService');
-
 class GameRepository {
   constructor() {
     // In-memory storage for game results (can be replaced with database later)
@@ -29,15 +27,15 @@ class GameRepository {
     return gameResult;
   }
 
-  // Retrieve recent game history
+  // Retrieve game history
   async getGameHistory(limit = 10) {
     return this.gameHistory.slice(0, limit);
   }
 
-  // Get last game result
-  async getLastGameResult() {
-    return this.gameHistory[0] || null;
+  // Get game result by game ID
+  async getGameResultById(gameId) {
+    return this.gameHistory.find(game => game.gameId === gameId);
   }
 }
 
-module.exports = new GameRepository();
+export default new GameRepository();

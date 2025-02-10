@@ -1,4 +1,4 @@
-module.exports = {
+export default {
   BETTING_DURATION: 5000,  // 5 seconds
   MIN_BET: 1,
   MAX_BET: 1000,

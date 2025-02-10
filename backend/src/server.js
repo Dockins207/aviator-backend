@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import cors from 'cors';
+import { default as cors } from 'cors';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import app from './app.js';
@@ -11,21 +11,42 @@ import GameSocket from './sockets/gameSocket.js';
 dotenv.config();
 
 const PORT = process.env.PORT || 8000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const FRONTEND_URL = process.env.FRONTEND_URL || '*';
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const SOCKET_PING_TIMEOUT = parseInt(process.env.SOCKET_PING_TIMEOUT) || 60000;
+const SOCKET_PING_INTERVAL = parseInt(process.env.SOCKET_PING_INTERVAL) || 25000;
 
 // Create Express app
 const expressApp = express();
-expressApp.use(cors());
+
+// Flexible CORS configuration
+const corsOptions = {
+  origin: FRONTEND_URL === '*' 
+    ? (origin, callback) => callback(null, true) 
+    : FRONTEND_URL,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+
+expressApp.use(cors(corsOptions));
 expressApp.use(express.json());
 
 // Create HTTP server
 const httpServer = createServer(expressApp);
 
-// Initialize Socket.IO
+// Initialize Socket.IO with flexible CORS
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    methods: ['GET', 'POST']
-  }
+    origin: FRONTEND_URL === '*' 
+      ? (origin, callback) => callback(null, true) 
+      : FRONTEND_URL,
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  pingTimeout: SOCKET_PING_TIMEOUT,
+  pingInterval: SOCKET_PING_INTERVAL
 });
 
 // Initialize WebSocket
@@ -33,7 +54,11 @@ const gameSocket = new GameSocket(io);
 
 // Basic routes
 expressApp.get('/', (req, res) => {
-  res.json({ message: 'Aviator Game Backend' });
+  res.json({ 
+    message: 'Aviator Game Backend', 
+    environment: NODE_ENV,
+    frontendUrl: FRONTEND_URL
+  });
 });
 
 // Error handling middleware
@@ -41,7 +66,7 @@ expressApp.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ 
     message: 'Something went wrong!',
-    error: process.env.NODE_ENV === 'production' ? {} : err.message 
+    error: NODE_ENV === 'production' ? {} : err.message 
   });
 });
 
@@ -51,8 +76,10 @@ import('./sockets/chatSocket.js').then(({ default: chatSocket }) => {
 });
 
 // Start server
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   logger.info(`Server running on port ${PORT}`);
+  logger.info(`Environment: ${NODE_ENV}`);
+  logger.info(`Frontend URL: ${FRONTEND_URL}`);
   
   // Automatically start game cycles
   setInterval(() => {
