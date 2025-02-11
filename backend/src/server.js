@@ -3,76 +3,105 @@ import express from 'express';
 import { default as cors } from 'cors';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
-import app from './app.js';
+import os from 'os';
 import logger from './config/logger.js';
-import GameSocket from './sockets/gameSocket.js';
+import app from './app.js';
 
-// Load environment variables
-dotenv.config();
-
+// Explicitly set environment variables
 const PORT = process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const FRONTEND_URL = process.env.FRONTEND_URL || '*';
-const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const SOCKET_PING_TIMEOUT = parseInt(process.env.SOCKET_PING_TIMEOUT) || 60000;
-const SOCKET_PING_INTERVAL = parseInt(process.env.SOCKET_PING_INTERVAL) || 25000;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
-// Create Express app
-const expressApp = express();
-
-// Flexible CORS configuration
+// Enhanced CORS configuration
 const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    // Define allowed origins
-    const allowedOrigins = [
-      'http://localhost:3000', 
-      'http://127.0.0.1:3000', 
-      'http://192.168.0.10:3000',
-      'http://192.168.0.12:3000',
-      process.env.FRONTEND_URL
-    ];
-    
-    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: [
+    'http://localhost:3000',   // Local development frontend
+    'http://192.168.0.12:3000', // Local network frontend
+    'http://127.0.0.1:3000'    // Localhost alternative
+  ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 };
 
-expressApp.use(cors(corsOptions));
-expressApp.use(express.json());
+// Network interface logging
+function getNetworkInterfaces() {
+  const interfaces = os.networkInterfaces();
+  const networkInfo = [];
+
+  Object.keys(interfaces).forEach((interfaceName) => {
+    interfaces[interfaceName].forEach((details) => {
+      if (details.family === 'IPv4' && !details.internal) {
+        networkInfo.push({
+          name: interfaceName,
+          address: details.address,
+          netmask: details.netmask
+        });
+      }
+    });
+  });
+
+  return networkInfo;
+}
 
 // Create HTTP server
-const httpServer = createServer(expressApp);
+const httpServer = createServer(app);
 
-// Initialize Socket.IO with flexible CORS
-const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: '*', // Allow all origins
-    methods: ['GET', 'POST'],
-    credentials: true
-  },
-  pingTimeout: SOCKET_PING_TIMEOUT,
-  pingInterval: SOCKET_PING_INTERVAL
+// Import socket and game modules dynamically
+Promise.all([
+  import('./sockets/gameSocket.js'),
+  import('./sockets/chatSocket.js'),
+  import('./sockets/betSocket.js')
+]).then(([{ default: GameSocket }, { default: chatSocket }, { default: betSocket }]) => {
+  // Initialize Socket.IO
+  const io = new SocketIOServer(httpServer, {
+    cors: corsOptions
+  });
+
+  // Initialize socket handlers
+  const gameSocket = new GameSocket(io);
+  chatSocket(io);
+  betSocket(io);
+
+  // Start server
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log('=== SERVER STARTUP DETAILS ===');
+    console.log(`[SERVER] Running on ALL interfaces`);
+    console.log(`[SERVER] Port: ${PORT}`);
+    console.log(`[SERVER] Environment: ${NODE_ENV}`);
+    console.log(`[SERVER] Frontend URL: ${FRONTEND_URL}`);
+    
+    // Log network interfaces
+    console.log('[SERVER] Network Interfaces:');
+    const networkInterfaces = getNetworkInterfaces();
+    networkInterfaces.forEach((iface) => {
+      console.log(`  - ${iface.name}: ${iface.address}`);
+    });
+
+    console.log('[SERVER] Accessible via:');
+    console.log(`  - http://localhost:${PORT}`);
+    console.log(`  - http://127.0.0.1:${PORT}`);
+    console.log(`  - http://0.0.0.0:${PORT}`);
+    networkInterfaces.forEach((iface) => {
+      console.log(`  - http://${iface.address}:${PORT}`);
+    });
+
+    // Start game cycle
+    gameSocket.startGameCycle();
+  });
+
+  // Error handling
+  httpServer.on('error', (error) => {
+    console.error('[SERVER ERROR]', error);
+    process.exit(1);
+  });
+}).catch((error) => {
+  console.error('[INITIALIZATION ERROR]', error);
+  process.exit(1);
 });
-
-console.log('[SOCKET] CORS Configuration:', { 
-  origin: '*', 
-  methods: ['GET', 'POST'] 
-});
-
-// Initialize WebSocket
-const gameSocket = new GameSocket(io);
 
 // Basic routes
-expressApp.get('/', (req, res) => {
+app.get('/', (req, res) => {
   res.json({ 
     message: 'Aviator Game Backend', 
     environment: NODE_ENV,
@@ -81,7 +110,7 @@ expressApp.get('/', (req, res) => {
 });
 
 // Error handling middleware
-expressApp.use((err, req, res, next) => {
+app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ 
     message: 'Something went wrong!',
@@ -89,26 +118,11 @@ expressApp.use((err, req, res, next) => {
   });
 });
 
-// Import socket handlers
-import('./sockets/chatSocket.js').then(({ default: chatSocket }) => {
-  chatSocket(io);
-});
-
-// Start server
-httpServer.listen(PORT, '0.0.0.0', () => {
-  logger.info(`Server running on port ${PORT}`);
-  logger.info(`Environment: ${NODE_ENV}`);
-  logger.info(`Frontend URL: ${FRONTEND_URL}`);
-  
-  // Use the game cycle from GameSocket
-  gameSocket.startGameCycle();
-});
-
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  logger.info('SIGTERM received. Shutting down gracefully');
+  console.log('SIGTERM received. Shutting down gracefully');
   httpServer.close(() => {
-    logger.info('Process terminated');
+    console.log('Process terminated');
     process.exit(0);
   });
 });

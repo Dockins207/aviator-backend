@@ -4,10 +4,10 @@ export default function chatSocket(io) {
   const chatNamespace = io.of('/chat');
 
   chatNamespace.on('connection', (socket) => {
-    logger.info('New chat client connected');
+    console.log(`[CHAT_SOCKET] New client connected: ${socket.id}`);
 
     socket.on('sendMessage', (message) => {
-      logger.info(`Chat message received: ${JSON.stringify(message)}`);
+      console.log(`[CHAT_SOCKET] Message received from ${socket.id}`);
       
       // Broadcast message to all connected chat clients
       chatNamespace.emit('newMessage', {
@@ -18,7 +18,7 @@ export default function chatSocket(io) {
     });
 
     socket.on('disconnect', () => {
-      logger.info('Chat client disconnected');
+      console.log(`[CHAT_SOCKET] Client disconnected: ${socket.id}`);
     });
   });
 }

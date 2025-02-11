@@ -23,7 +23,7 @@ class GameRepository {
       this.gameHistory.pop();
     }
 
-    console.log('Game result saved:', gameResult);
+    // console.log('Game result saved:', gameResult);
     return gameResult;
   }
 

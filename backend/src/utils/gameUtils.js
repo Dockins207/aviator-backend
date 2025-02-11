@@ -49,17 +49,14 @@ class GameUtils {
         baseCrashPoint, 
         Math.min(
           maxCrashPoint, 
-          baseCrashPoint * Math.pow(exponentFactor * randomVariation, 0.7)
+          Number((exponentFactor * randomVariation).toFixed(2))
         )
       );
       
-      // Ensure 2-decimal precision and add some randomness
-      const finalCrashPoint = Number((crashPoint * (1 + Math.random() * 0.2)).toFixed(2));
-      
-      return finalCrashPoint;
+      return crashPoint;
     } catch (error) {
-      console.error('Crash point generation error:', error);
-      return 2.50; // Fallback value with more variation
+      console.error('Error generating crash point:', error);
+      return 1.5; // Safe default
     }
   }
 
@@ -70,30 +67,16 @@ class GameUtils {
     return `${timestamp}-${randomPart}`;
   }
 
-  // Simulate multiplier progression with robust number handling
+  // Simulate multiplier progression
   simulateMultiplierProgression(currentMultiplier, crashPoint) {
-    try {
-      // Ensure valid input numbers
-      const current = Number(currentMultiplier) || 1.00;
-      const crash = Number(crashPoint) || 2.50;
-
-      // Fixed increment of 0.01
-      const increment = 0.01;
-      
-      // Calculate new multiplier
-      let newMultiplier = current + increment;
-      
-      // If the next increment would exceed crash point, set to exact crash point
-      if (newMultiplier >= crash) {
-        newMultiplier = crash;
-      }
-      
-      // Ensure 2 decimal places
-      return Number(newMultiplier.toFixed(2));
-    } catch (error) {
-      console.error('Multiplier progression error:', error);
-      return 1.00; // Fallback value
-    }
+    // Increment by 0.01 with randomness
+    const increment = 0.01 * (1 + Math.random() * 0.2 - 0.1);
+    const newMultiplier = Math.min(
+      Number((currentMultiplier + increment).toFixed(2)), 
+      crashPoint
+    );
+    
+    return newMultiplier;
   }
 }
 
