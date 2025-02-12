@@ -1,5 +1,8 @@
 import gameService from './gameService.js';
 import gameUtils from '../utils/gameUtils.js';
+import { WalletRepository } from '../repositories/walletRepository.js';
+import GameRepository from '../repositories/gameRepository.js';
+import logger from '../config/logger.js';
 
 class BetService {
   constructor() {
@@ -97,6 +100,70 @@ class BetService {
    */
   resetBets() {
     this.currentBets = [];
+  }
+
+  static async placeBet(userId, betAmount, gameType) {
+    try {
+      // Deduct bet amount from wallet
+      const remainingBalance = await WalletRepository.placeBet(userId, betAmount);
+
+      // Create game record
+      const gameId = await GameRepository.createGameRecord(userId, gameType, betAmount);
+
+      logger.info('Bet placed successfully', { userId, betAmount, gameType });
+
+      return {
+        success: true,
+        remainingBalance,
+        gameId
+      };
+    } catch (error) {
+      logger.error('Bet placement failed', { 
+        userId, 
+        betAmount, 
+        gameType,
+        errorMessage: error.message 
+      });
+      throw error;
+    }
+  }
+
+  static async resolveGameOutcome(userId, gameId, winAmount) {
+    try {
+      // If user won
+      if (winAmount > 0) {
+        const newBalance = await WalletRepository.processWinnings(userId, winAmount);
+        
+        // Update game record
+        await GameRepository.updateGameOutcome(gameId, 'WIN', winAmount);
+
+        logger.info('Game won successfully', { userId, gameId, winAmount });
+
+        return {
+          success: true,
+          winAmount,
+          newBalance
+        };
+      }
+
+      // If user lost, just update game record
+      await GameRepository.updateGameOutcome(gameId, 'LOSS', 0);
+
+      logger.info('Game lost', { userId, gameId });
+
+      return {
+        success: true,
+        winAmount: 0
+      };
+    } catch (error) {
+      logger.error('Game resolution failed', { 
+        userId, 
+        gameId, 
+        winAmount,
+        errorMessage: error.message 
+      });
+      throw error;
+    }
   }
 }
 

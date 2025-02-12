@@ -12,16 +12,17 @@ const PORT = process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
-// Enhanced CORS configuration
+// Completely open CORS configuration for development
 const corsOptions = {
-  origin: [
-    'http://localhost:3000',   // Local development frontend
-    'http://192.168.0.12:3000', // Local network frontend
-    'http://127.0.0.1:3000'    // Localhost alternative
-  ],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  origin: function(origin, callback) {
+    // Allow any origin during development
+    callback(null, true);
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Origin', 'Accept'],
+  credentials: true,
+  optionsSuccessStatus: 200,
+  maxAge: 3600
 };
 
 // Network interface logging

@@ -127,8 +127,19 @@ class GameBoardService {
     // Ensure final multiplier matches the crash point exactly
     this.gameState.multiplier = this.gameState.crashPoint;
 
-    // Save game result to repository
-    GameRepository.saveGameResult(this.gameState);
+    // Log the entire gameState before calling saveGameResult
+    logger.info('Attempting to save game result', { gameState: this.gameState });
+
+    try {
+      // Save game result to repository
+      GameRepository.saveGameResult(this.gameState);
+    } catch (error) {
+      logger.error('Failed to save game result in crashGame', { 
+        error: error.message,
+        gameState: this.gameState
+      });
+      throw error;
+    }
   }
 
   // Get current game state
