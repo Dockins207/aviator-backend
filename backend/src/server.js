@@ -12,6 +12,7 @@ import errorMiddleware from './middleware/errorMiddleware.js';
 import authRoutes from './routes/authRoutes.js';
 import gameRoutes from './routes/gameRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
+import betRoutes from './routes/betRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -97,6 +98,14 @@ async function startServer() {
         console.log('=== SERVER STARTUP DETAILS ===');
         console.log(`[SERVER] Running on ALL interfaces`);
         
+        // Log all registered routes
+        console.log('[SERVER] Registered Routes:');
+        app._router.stack.forEach((r) => {
+          if (r.route && r.route.path) {
+            console.log(`  - ${Object.keys(r.route.methods).join(', ').toUpperCase()}: ${r.route.path}`);
+          }
+        });
+
         // Explicitly connect to Redis before starting game cycle
         try {
           await redisConnection.connect();
@@ -143,11 +152,27 @@ async function startServer() {
     app.use('/api/auth', authRoutes);
     app.use('/api/game', gameRoutes);
     app.use('/api/wallet', walletRoutes);
+    app.use('/api/bet', betRoutes);
     app.get('/', (req, res) => {
       res.json({ 
         message: 'Aviator Game Backend', 
         environment: NODE_ENV,
         frontendUrl: FRONTEND_URL
+      });
+    });
+
+    // Catch-all route for debugging
+    app.use((req, res, next) => {
+      console.error('[UNHANDLED_REQUEST]', {
+        method: req.method,
+        path: req.path,
+        headers: req.headers,
+        body: req.body
+      });
+      res.status(404).json({
+        message: 'Route not found',
+        method: req.method,
+        path: req.path
       });
     });
 

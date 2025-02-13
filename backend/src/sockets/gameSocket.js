@@ -92,41 +92,29 @@ class GameSocket {
     this.startGameCycleWithSocketUpdates();
   }
 
-  broadcastBettingPhase(gameState) {
+  async broadcastBettingPhase(gameState) {
     try {
-      // Ensure gameState and its properties exist
-      if (!gameState) {
-        logger.warn('[GAME_SOCKET] Attempted to broadcast undefined game state');
-        return;
-      }
-
-      // Safely get players count, defaulting to 0 if undefined
-      const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
-
-      // Broadcast betting phase with button state control
+      // Broadcast betting phase 
       this.io.emit('gameStateUpdate', {
         status: 'betting',
         gameId: gameState.gameId || null,
         multiplier: 1.00,  // Always 1.00 in betting phase
-        countdown: gameState.countdown || 5,
+        countdown: gameState.countdown,
         crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
-        players: playerCount,
+        players: Array.isArray(gameState.players) ? gameState.players.length : 0,
         buttonState: {
           placeBet: true,    // Always enable place bet button
           cashOut: false,    // Disable cashout button
           nextAction: 'placeBet'
         },
         betPhaseDetails: {
-          remainingTime: gameState.countdown || 5,
+          remainingTime: gameState.countdown,
           startTime: gameState.startTime || Date.now()
         }
       });
     } catch (error) {
-      logger.error('[GAME_SOCKET] Error in broadcastBettingPhase', {
-        errorMessage: error.message,
-        errorStack: error.stack,
-        gameState: JSON.stringify(gameState)
-      });
+      // Silently handle any broadcasting errors
+      console.error('Error in broadcastBettingPhase', error);
     }
   }
 

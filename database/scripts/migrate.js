@@ -29,7 +29,7 @@ async function runMigrations() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS migrations (
         id SERIAL PRIMARY KEY,
-        name VARCHAR(255) UNIQUE NOT NULL,
+        name VARCHAR(255) NOT NULL UNIQUE,
         run_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -53,47 +53,76 @@ async function runMigrations() {
         [file]
       );
 
-      if (checkMigration.rows.length === 0) {
-        log(`Running migration: ${file}`);
-        
-        try {
-          // Run migration
-          await client.query(migrationSql);
+      // Force re-run migrations if FORCE_MIGRATE is set
+      const forceMigrate = process.env.FORCE_MIGRATE === 'true';
 
-          // Log migration in migrations table
-          await client.query(
-            'INSERT INTO migrations (name) VALUES ($1)', 
-            [file]
-          );
+      // Check if table exists
+      const tableNameMatch = file.match(/create_(\w+)_table\.sql$/);
+      let tableExists = false;
+      if (tableNameMatch) {
+        const tableName = tableNameMatch[1] + '_table';
+        const tableCheckResult = await client.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = $1
+          )
+        `, [tableName]);
+        tableExists = tableCheckResult.rows[0].exists;
+      }
 
-          log(`Migration ${file} completed successfully`);
-        } catch (migrationError) {
-          // Log the full error for debugging
-          log(`Migration error details: ${JSON.stringify(migrationError)}`, 'error');
+      // Skip only if not force migrating and table exists
+      if (checkMigration.rows.length > 0 && !forceMigrate && tableExists) {
+        log(`Migration ${file} already run, skipping`);
+        continue;
+      }
 
-          // Check if error is due to existing table
-          if (migrationError.code === '42P07') {
-            log(`Table already exists in migration ${file}, skipping`, 'warn');
-            
-            // Still record the migration to prevent re-running
-            await client.query(
-              'INSERT INTO migrations (name) VALUES ($1)', 
-              [file]
-            );
+      // If force migrate is true, remove previous migration record
+      if (forceMigrate) {
+        await client.query('DELETE FROM migrations WHERE name = $1', [file]);
+        log(`Force re-running migration ${file}`);
+      }
+
+      log(`Running migration: ${file}`);
+      
+      try {
+        // Run migration
+        await client.query(migrationSql);
+
+        // Log migration in migrations table
+        const insertQuery = `
+          INSERT INTO migrations (name, run_at) 
+          VALUES ($1, CURRENT_TIMESTAMP)
+          ON CONFLICT (name) DO NOTHING
+        `;
+        await client.query(insertQuery, [file]);
+
+        log(`Migration ${file} completed successfully`);
+      } catch (migrationError) {
+        // Log the full error for debugging
+        log(`Migration error details: ${JSON.stringify(migrationError)}`, 'error');
+
+        // Check if error is due to existing table
+        if (migrationError.code === '42P07') {
+          log(`Table already exists in migration ${file}, skipping`, 'warn');
+          
+          // Still record the migration to prevent re-running
+          const insertQuery = `
+            INSERT INTO migrations (name, run_at) 
+            VALUES ($1, CURRENT_TIMESTAMP)
+            ON CONFLICT (name) DO NOTHING
+          `;
+          await client.query(insertQuery, [file]);
+        } else {
+          log(`Error in migration ${file}: ${migrationError.message}`, 'error');
+          // Decide whether to continue or stop based on error
+          if (migrationError.message.includes('current transaction is aborted')) {
+            log('Transaction aborted, attempting to continue', 'warn');
+            await client.query('ROLLBACK');
+            await client.query('BEGIN');
           } else {
-            log(`Error in migration ${file}: ${migrationError.message}`, 'error');
-            // Decide whether to continue or stop based on error
-            if (migrationError.message.includes('current transaction is aborted')) {
-              log('Transaction aborted, attempting to continue', 'warn');
-              await client.query('ROLLBACK');
-              await client.query('BEGIN');
-            } else {
-              throw migrationError;
-            }
+            throw migrationError;
           }
         }
-      } else {
-        log(`Migration ${file} already run, skipping`);
       }
     }
 

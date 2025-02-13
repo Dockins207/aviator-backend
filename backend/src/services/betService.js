@@ -28,90 +28,61 @@ class BetService {
    * @returns {Object} Bet placement result
    */
   async placeBet(betData) {
+    const gameType = 'aviator';
+
+    // Validate game state
+    if (!gameService.gameState || 
+        gameService.gameState.status !== 'betting') {
+      throw new Error('Betting is not currently allowed');
+    }
+
+    // Ensure game ID is available from game state
+    if (!gameService.gameState.gameId) {
+      throw new Error('No active game ID available. Game cycle may not have started.');
+    }
+
+    // Generate unique bet ID
+    const betId = uuidv4();
+
     try {
-      const currentGameState = gameService.getCurrentGameState();
+      // Use game ID from game state
+      const gameId = gameService.gameState.gameId;
 
-      // STRICT: Only allow bets during BETTING or CRASHED states
-      const allowedStates = ['betting', 'crashed'];
-      if (!allowedStates.includes(currentGameState.status)) {
-        const errorMsg = `Betting not allowed in ${currentGameState.status} state`;
-        logger.error(errorMsg, { 
-          currentState: currentGameState.status,
-          allowedStates: allowedStates
-        });
-        throw new ValidationError(errorMsg);
-      }
+      // Place bet in the game
+      const playerBet = await GameRepository.createGameRecord(
+        betData.user, 
+        gameType, 
+        betData.amount,
+        gameId
+      );
 
-      // Validate user ID and bet amount
-      if (!betData.user) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const MIN_BET = 10;  // Minimum bet amount
-      const MAX_BET = 1000;  // Maximum bet amount
-      if (!betData.amount || betData.amount < MIN_BET) {
-        throw new ValidationError(`Minimum bet amount is ${MIN_BET}`);
-      }
-
-      if (betData.amount > MAX_BET) {
-        throw new ValidationError(`Maximum bet amount is ${MAX_BET}`);
-      }
-
-      // Generate unique bet ID
-      const betId = v4();
-
-      // Validate user's wallet balance
-      const walletRepository = new WalletRepository();
-      const userWallet = await walletRepository.getWalletByUserId(betData.user);
-
-      if (!userWallet || userWallet.balance < betData.amount) {
-        throw new ValidationError('Insufficient wallet balance');
-      }
-
-      // Deduct bet amount from wallet
-      await walletRepository.deductBalance(betData.user, betData.amount);
-
-      // Create bet record
-      const gameRepository = new GameRepository();
-      const currentGameSession = await gameRepository.getCurrentGameSession();
-
-      const betRecord = {
-        playerBetId: betId,
-        userId: betData.user,
-        gameSessionId: currentGameSession.gameSessionId,
-        betAmount: betData.amount,
-        status: 'placed',
-        cashoutMultiplier: null,
-        payoutAmount: null
-      };
-
-      // Save bet to database
-      const savedBet = await gameRepository.createPlayerBet(betRecord);
-
-      // Add to active bets tracking
-      this.currentBets.push(savedBet);
-
+      // Log successful bet placement
       logger.info('Bet placed successfully', { 
-        userId: savedBet.userId, 
-        gameType: currentGameSession.gameType,
-        betAmount: savedBet.betAmount 
-      });
-
-      return savedBet;
-    } catch (error) {
-      // Handle and log errors
-      logger.error('BET_PLACEMENT_ERROR', {
-        errorMessage: error.message,
         userId: betData.user,
-        betAmount: betData.amount
+        gameType,
+        betAmount: betData.amount,
+        gameId,
+        betId
       });
 
-      // Rethrow or handle specific error types
-      if (error instanceof ValidationError) {
-        throw error;
-      }
+      // Return bet result with game ID from game state
+      return {
+        betId,
+        amount: betData.amount,
+        user: betData.user,
+        gameId: gameId  // Explicitly return game ID
+      };
+    } catch (error) {
+      // Comprehensive error logging
+      logger.error('Bet placement failed', {
+        userId: betData.user,
+        betAmount: betData.amount,
+        gameId: gameService.gameState.gameId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
 
-      throw new Error('Bet placement failed');
+      throw error;
     }
   }
 
@@ -138,8 +109,7 @@ class BetService {
       const updatedBet = await gameRepository.updatePlayerBet(updateBetRecord);
 
       // Credit wallet with cashout amount
-      const walletRepository = new WalletRepository();
-      await walletRepository.creditBalance(userId, updatedBet.payoutAmount);
+      await WalletRepository.creditBalance(userId, updatedBet.payoutAmount);
 
       return updatedBet;
     } catch (error) {
@@ -248,7 +218,7 @@ class BetService {
     }
   }
 
-  static async placeBet(userId, betAmount, gameType) {
+  static async createGameRecord(userId, gameType, betAmount) {
     try {
       // Deduct bet amount from wallet
       const remainingBalance = await WalletRepository.placeBet(userId, betAmount);

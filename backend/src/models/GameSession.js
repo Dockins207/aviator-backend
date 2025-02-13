@@ -1,21 +1,23 @@
 export class GameSession {
-  constructor(id, gameType, status, totalBetAmount, startedAt, endedAt) {
+  constructor(id, gameType, status, totalBetAmount, crashPoint, createdAt, updatedAt) {
     this.id = id;
     this.gameType = gameType;
     this.status = status;
     this.totalBetAmount = totalBetAmount;
-    this.startedAt = startedAt;
-    this.endedAt = endedAt;
+    this.crashPoint = crashPoint;
+    this.createdAt = createdAt;
+    this.updatedAt = updatedAt;
   }
 
   static fromRow(row) {
-    return new GameSession(
-      row.id,
-      row.game_type,
-      row.status,
-      row.total_bet_amount,
-      row.started_at,
-      row.ended_at
-    );
+    return new GameSession({
+      id: row.game_session_id,
+      gameType: row.game_type,
+      status: row.status,
+      totalBetAmount: parseFloat(row.total_bet_amount || 0),
+      crashPoint: row.crash_point ? parseFloat(row.crash_point) : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    });
   }
 }

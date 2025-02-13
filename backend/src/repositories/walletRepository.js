@@ -247,7 +247,6 @@ export class WalletRepository {
         UPDATE wallets 
         SET 
           balance = balance - $2,
-          total_bet_amount = total_bet_amount + $2,
           updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $1 AND balance >= $2
         RETURNING balance
@@ -264,11 +263,17 @@ export class WalletRepository {
       const transactionQuery = `
         INSERT INTO wallet_transactions (
           user_id, 
+          wallet_id,
           amount, 
-          type, 
+          transaction_type, 
           description, 
           status
-        ) VALUES ($1, $2, 'BET', 'Game Bet', 'COMPLETED')
+        ) VALUES ($1, 
+          (SELECT wallet_id FROM wallets WHERE user_id = $1), 
+          $2, 
+          'bet', 
+          'Game Bet', 
+          'completed')
       `;
       await client.query(transactionQuery, [userId, betAmount]);
 
@@ -279,7 +284,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback the transaction in case of error
       await client.query('ROLLBACK');
-      console.error('Error placing bet:', error);
       throw error;
     } finally {
       client.release();
@@ -439,6 +443,73 @@ export class WalletRepository {
       return result.rows[0].balance;
     } catch (error) {
       console.error('Error fetching user balance:', error);
+      throw error;
+    }
+  }
+
+  // Deduct balance from user's wallet
+  static async deductBalance(userId, amount) {
+    const query = `
+      UPDATE wallets 
+      SET balance = balance - $2, 
+          updated_at = NOW() 
+      WHERE user_id = $1 
+      AND balance >= $2 
+      RETURNING *
+    `;
+    try {
+      const result = await pool.query(query, [userId, amount]);
+      
+      if (result.rows.length === 0) {
+        throw new Error('Insufficient balance or user wallet not found');
+      }
+      
+      logger.info('Wallet balance deducted', { 
+        userId, 
+        amount,
+        newBalance: result.rows[0].balance 
+      });
+      
+      return Wallet.fromRow(result.rows[0]);
+    } catch (error) {
+      logger.error('Error deducting wallet balance', { 
+        userId, 
+        amount, 
+        errorMessage: error.message 
+      });
+      throw error;
+    }
+  }
+
+  // Credit balance to user's wallet
+  static async creditBalance(userId, amount) {
+    const query = `
+      UPDATE wallets 
+      SET balance = balance + $2, 
+          updated_at = NOW() 
+      WHERE user_id = $1 
+      RETURNING *
+    `;
+    try {
+      const result = await pool.query(query, [userId, amount]);
+      
+      if (result.rows.length === 0) {
+        throw new Error('User wallet not found');
+      }
+      
+      logger.info('Wallet balance credited', { 
+        userId, 
+        amount,
+        newBalance: result.rows[0].balance 
+      });
+      
+      return Wallet.fromRow(result.rows[0]);
+    } catch (error) {
+      logger.error('Error crediting wallet balance', { 
+        userId, 
+        amount, 
+        errorMessage: error.message 
+      });
       throw error;
     }
   }

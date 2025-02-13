@@ -21,11 +21,13 @@ class GameRepository {
           total_bet_amount
         ) VALUES ($1, 'in_progress', $2)
         ON CONFLICT (game_type, status) 
-        DO UPDATE SET total_bet_amount = game_sessions.total_bet_amount + $2
-        RETURNING id
+        DO UPDATE SET 
+          total_bet_amount = COALESCE(game_sessions.total_bet_amount, 0) + $2,
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING game_session_id
       `;
       const sessionResult = await client.query(sessionQuery, [gameType, betAmount]);
-      const gameSessionId = sessionResult.rows[0].id;
+      const gameSessionId = sessionResult.rows[0].game_session_id;
 
       // Withdraw bet amount from wallet
       await WalletRepository.withdraw(userId, betAmount, `${gameType} Game Bet`);
@@ -38,10 +40,10 @@ class GameRepository {
           bet_amount, 
           status
         ) VALUES ($1, $2, $3, 'placed')
-        RETURNING id
+        RETURNING player_bet_id
       `;
       const betResult = await client.query(betQuery, [userId, gameSessionId, betAmount]);
-      const playerBetId = betResult.rows[0].id;
+      const playerBetId = betResult.rows[0].player_bet_id;
 
       // Commit transaction
       await client.query('COMMIT');
@@ -55,8 +57,11 @@ class GameRepository {
       });
 
       return {
+        id: playerBetId,
         gameSessionId,
-        playerBetId
+        userId,
+        betAmount,
+        gameType
       };
     } catch (error) {
       // Rollback transaction on error
@@ -93,7 +98,7 @@ class GameRepository {
         SET 
           status = $2,
           ended_at = CURRENT_TIMESTAMP
-        WHERE id = $1
+        WHERE game_session_id = $1
         RETURNING *
       `;
       const sessionResult = await client.query(sessionQuery, [
@@ -182,7 +187,7 @@ class GameRepository {
   static async getUserGameHistory(userId, limit = 10, offset = 0) {
     const query = `
       SELECT 
-        gs.id AS game_session_id,
+        gs.game_session_id,
         gs.game_type,
         gs.status,
         gs.total_bet_amount,
@@ -194,8 +199,8 @@ class GameRepository {
         pb.status AS bet_status,
         pb.payout_amount
       FROM game_sessions gs
-      JOIN player_bets pb ON gs.id = pb.game_session_id
-      LEFT JOIN game_results gr ON gs.id = gr.game_session_id
+      JOIN player_bets pb ON gs.game_session_id = pb.game_session_id
+      LEFT JOIN game_results gr ON gs.game_session_id = gr.game_session_id
       WHERE pb.user_id = $1
       ORDER BY gs.started_at DESC
       LIMIT $2 OFFSET $3
@@ -213,6 +218,64 @@ class GameRepository {
     } catch (error) {
       logger.error('Failed to retrieve user game history', { 
         userId,
+        errorMessage: error.message 
+      });
+      throw error;
+    }
+  }
+
+  // Get the current active game session
+  static async getCurrentGameSession(gameType = 'aviator') {
+    const query = `
+      SELECT * FROM game_sessions 
+      WHERE game_type = $1 
+      AND status IN ('in_progress', 'betting', 'starting')
+      ORDER BY created_at DESC 
+      LIMIT 1
+    `;
+    try {
+      const result = await pool.query(query, [gameType]);
+      
+      if (result.rows.length === 0) {
+        // No active game session found
+        return null;
+      }
+      
+      return GameSession.fromRow(result.rows[0]);
+    } catch (error) {
+      logger.error('Error fetching current game session', { 
+        gameType, 
+        errorMessage: error.message 
+      });
+      throw error;
+    }
+  }
+
+  // Create a new game session
+  static async createGameSession(gameType = 'aviator', status = 'betting') {
+    const query = `
+      INSERT INTO game_sessions (
+        game_type, 
+        status, 
+        total_bet_amount,
+        crash_point
+      ) VALUES ($1, $2, 0, NULL)
+      RETURNING *
+    `;
+    try {
+      const result = await pool.query(query, [gameType, status]);
+      
+      logger.info('New game session created', { 
+        gameType, 
+        status,
+        gameSessionId: result.rows[0].game_session_id 
+      });
+      
+      return GameSession.fromRow(result.rows[0]);
+    } catch (error) {
+      logger.error('Error creating game session', { 
+        gameType, 
+        status, 
         errorMessage: error.message 
       });
       throw error;
