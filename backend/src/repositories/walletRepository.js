@@ -1,18 +1,33 @@
 import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
-import { balanceService } from '../services/authService.js';
+import { Wallet } from '../models/Wallet.js';
 
 export class WalletRepository {
   // Create wallet for a new user
   static async createWallet(userId) {
     const query = `
-      INSERT INTO wallets (user_id, currency) 
-      VALUES ($1, 'KSH') 
+      INSERT INTO wallets (user_id, currency, balance) 
+      VALUES ($1, 'KSH', 0.00) 
+      ON CONFLICT (user_id) DO NOTHING
       RETURNING *
     `;
     try {
       const result = await pool.query(query, [userId]);
-      return result.rows[0];
+      
+      // If no rows returned (wallet already exists), fetch existing wallet
+      if (result.rows.length === 0) {
+        const existingWalletQuery = `
+          SELECT * FROM wallets 
+          WHERE user_id = $1
+        `;
+        const existingResult = await pool.query(existingWalletQuery, [userId]);
+        
+        if (existingResult.rows.length > 0) {
+          return Wallet.fromRow(existingResult.rows[0]);
+        }
+      }
+      
+      return result.rows.length > 0 ? Wallet.fromRow(result.rows[0]) : null;
     } catch (error) {
       logger.error('Error creating wallet', { 
         userId, 
@@ -29,12 +44,23 @@ export class WalletRepository {
       WHERE user_id = $1
     `;
     try {
+      console.log('DEBUG: Fetching wallet for userId', { userId });
+      
       const result = await pool.query(query, [userId]);
-      return result.rows[0];
+      
+      console.log('DEBUG: Wallet query result', { 
+        rowCount: result.rows.length,
+        rows: result.rows 
+      });
+
+      return result.rows.length > 0 ? Wallet.fromRow(result.rows[0]) : null;
     } catch (error) {
+      console.error('DEBUG: Full error in getWalletByUserId', error);
+      
       logger.error('Error fetching wallet', { 
         userId, 
-        errorMessage: error.message 
+        errorMessage: error.message,
+        errorStack: error.stack
       });
       throw error;
     }
@@ -48,62 +74,73 @@ export class WalletRepository {
       // Start transaction
       await client.query('BEGIN');
 
-      // Insert transaction record
-      const transactionQuery = `
-        INSERT INTO wallet_transactions 
-        (user_id, wallet_id, amount, currency, transaction_type, description) 
-        VALUES (
-          $1, 
-          (SELECT id FROM wallets WHERE user_id = $1), 
-          $2, 
-          'KSH',
-          'deposit', 
-          $3
-        ) RETURNING *
+      // First, get the wallet details
+      const walletQuery = `
+        SELECT wallet_id FROM wallets 
+        WHERE user_id = $1
       `;
-      const transactionResult = await client.query(transactionQuery, [
-        userId, 
-        amount, 
-        description
-      ]);
+      const walletResult = await client.query(walletQuery, [userId]);
+      
+      if (walletResult.rows.length === 0) {
+        throw new Error('Wallet not found for user');
+      }
+      
+      const walletId = walletResult.rows[0].wallet_id;
 
       // Update wallet balance
       const updateQuery = `
         UPDATE wallets 
-        SET 
-          balance = balance + $2,
-          total_deposited = total_deposited + $2,
-          last_transaction_date = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
+        SET balance = balance + $1 
+        WHERE user_id = $2 
         RETURNING *
       `;
-      const walletResult = await client.query(updateQuery, [userId, amount]);
+      const updateResult = await client.query(updateQuery, [amount, userId]);
 
-      // Sync wallet balance to users table
-      await balanceService.syncWalletBalanceToUser(userId);
+      // Insert transaction record
+      const transactionQuery = `
+        INSERT INTO wallet_transactions (
+          transaction_id,
+          user_id, 
+          wallet_id, 
+          amount, 
+          currency, 
+          transaction_type, 
+          payment_method,
+          description
+        ) VALUES (
+          gen_random_uuid(),
+          $1, 
+          $2, 
+          $3, 
+          'KSH', 
+          'deposit', 
+          $4,
+          $5
+        )
+      `;
+      await client.query(transactionQuery, [
+        userId, 
+        walletId, 
+        amount, 
+        description,
+        description
+      ]);
 
       // Commit transaction
       await client.query('COMMIT');
 
-      return {
-        transaction: {
-          ...transactionResult.rows[0],
-          currency: 'KSH'
-        },
-        wallet: {
-          ...walletResult.rows[0],
-          currency: 'KSH'
-        }
-      };
+      return Wallet.fromRow(updateResult.rows[0]);
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      logger.error('Deposit failed', { 
+      
+      logger.error('Error processing deposit', { 
         userId, 
-        amount, 
-        errorMessage: error.message 
+        amount,
+        errorMessage: error.message,
+        errorStack: error.stack
       });
+      
       throw error;
     } finally {
       client.release();
@@ -118,74 +155,79 @@ export class WalletRepository {
       // Start transaction
       await client.query('BEGIN');
 
-      // Check current balance
-      const balanceQuery = `
-        SELECT balance FROM wallets 
+      // First, get the wallet details
+      const walletQuery = `
+        SELECT wallet_id, balance FROM wallets 
         WHERE user_id = $1
       `;
-      const balanceResult = await client.query(balanceQuery, [userId]);
-      const currentBalance = balanceResult.rows[0].balance;
+      const walletResult = await client.query(walletQuery, [userId]);
+      
+      if (walletResult.rows.length === 0) {
+        throw new Error('Wallet not found for user');
+      }
+      
+      const walletId = walletResult.rows[0].wallet_id;
+      const currentBalance = parseFloat(walletResult.rows[0].balance);
 
+      // Check if sufficient balance
       if (currentBalance < amount) {
         throw new Error('Insufficient funds');
       }
 
-      // Insert transaction record
-      const transactionQuery = `
-        INSERT INTO wallet_transactions 
-        (user_id, wallet_id, amount, currency, transaction_type, description) 
-        VALUES (
-          $1, 
-          (SELECT id FROM wallets WHERE user_id = $1), 
-          $2, 
-          'KSH',
-          'withdrawal', 
-          $3
-        ) RETURNING *
-      `;
-      const transactionResult = await client.query(transactionQuery, [
-        userId, 
-        amount, 
-        description
-      ]);
-
       // Update wallet balance
       const updateQuery = `
         UPDATE wallets 
-        SET 
-          balance = balance - $2,
-          total_withdrawn = total_withdrawn + $2,
-          last_transaction_date = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
+        SET balance = balance - $1 
+        WHERE user_id = $2 
         RETURNING *
       `;
-      const walletResult = await client.query(updateQuery, [userId, amount]);
+      const updateResult = await client.query(updateQuery, [amount, userId]);
 
-      // Sync wallet balance to users table
-      await balanceService.syncWalletBalanceToUser(userId);
+      // Insert transaction record
+      const transactionQuery = `
+        INSERT INTO wallet_transactions (
+          transaction_id,
+          user_id, 
+          wallet_id, 
+          amount, 
+          currency, 
+          transaction_type, 
+          payment_method,
+          description
+        ) VALUES (
+          gen_random_uuid(),
+          $1, 
+          $2, 
+          $3, 
+          'KSH', 
+          'withdrawal', 
+          $4,
+          $5
+        )
+      `;
+      await client.query(transactionQuery, [
+        userId, 
+        walletId, 
+        amount, 
+        description,
+        description
+      ]);
 
       // Commit transaction
       await client.query('COMMIT');
 
-      return {
-        transaction: {
-          ...transactionResult.rows[0],
-          currency: 'KSH'
-        },
-        wallet: {
-          ...walletResult.rows[0],
-          currency: 'KSH'
-        }
-      };
+      return Wallet.fromRow(updateResult.rows[0]);
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      logger.error('Withdrawal failed', { 
+      
+      logger.error('Error processing withdrawal', { 
         userId, 
-        amount, 
-        errorMessage: error.message 
+        amount,
+        errorMessage: error.message,
+        errorStack: error.stack
       });
+      
       throw error;
     } finally {
       client.release();

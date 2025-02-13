@@ -32,12 +32,8 @@ async function connectWithRetry(maxRetries = 5) {
       // Verify basic database functionality
       await client.query('SELECT NOW()');
       
-      logger.info(`Successfully connected to PostgreSQL database (Attempt ${attempt})`, {
-        host: 'localhost',
-        port: 5432,
-        database: 'aviator_db',
-        user: 'admin',
-      });
+      logger.databaseInfo(`Database connection established successfully (Attempt ${attempt})`);
+      
       isConnected = true;
       
       // Release the client back to the pool
@@ -45,7 +41,7 @@ async function connectWithRetry(maxRetries = 5) {
       
       return true;
     } catch (err) {
-      logger.error(`Database connection attempt ${attempt} failed`, { 
+      logger.databaseError(`Database connection attempt ${attempt} failed`, { 
         error: err.message,
         attempt: attempt,
         maxRetries: maxRetries,
@@ -60,7 +56,7 @@ async function connectWithRetry(maxRetries = 5) {
     }
   }
   
-  logger.error('Failed to connect to the database after multiple attempts', {
+  logger.databaseError('Failed to connect to the database after multiple attempts', {
     host: 'localhost',
     port: 5432,
     database: 'aviator_db',

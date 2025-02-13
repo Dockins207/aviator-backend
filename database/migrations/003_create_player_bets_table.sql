@@ -1,14 +1,20 @@
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 -- Create player_bets table
 CREATE TYPE bet_status AS ENUM ('placed', 'won', 'lost', 'cashout');
 
 CREATE TABLE player_bets (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    game_session_id INTEGER REFERENCES game_sessions(id) ON DELETE CASCADE,
-    bet_amount DECIMAL(10, 2) NOT NULL,
-    cashout_multiplier DECIMAL(10, 2),
+    player_bet_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    game_session_id UUID NOT NULL REFERENCES game_sessions(game_session_id) ON DELETE CASCADE,
+    bet_amount DECIMAL(10, 2) NOT NULL CHECK (bet_amount > 0),
+    cashout_multiplier DECIMAL(10, 2) CHECK (
+        (status = 'cashout' AND cashout_multiplier > 1) OR 
+        (status != 'cashout' AND cashout_multiplier IS NULL)
+    ),
     status bet_status DEFAULT 'placed',
-    payout_amount DECIMAL(10, 2),
+    payout_amount DECIMAL(10, 2) CHECK (payout_amount >= 0),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -25,7 +31,7 @@ BEGIN
     NEW.updated_at = CURRENT_TIMESTAMP;
     RETURN NEW;
 END;
-$$ language 'plpgsql';
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER update_player_bets_modtime
 BEFORE UPDATE ON player_bets

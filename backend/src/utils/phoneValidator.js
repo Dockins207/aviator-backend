@@ -1,41 +1,64 @@
 import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
+import logger from '../config/logger.js';
 
-export const phoneValidator = {
+const phoneValidator = {
   /**
    * Validate Kenyan phone number
    * @param {string} phoneNumber - Raw phone number input
    * @returns {Object} Validation result
    */
   validate(phoneNumber) {
-    // Exact Kenyan phone number regex
-    const kenyanPhoneRegex = /^(?:\+254|0)(1[0-5]\d|7\d{2})\d{6}$/;
-
     // Remove any non-digit characters
-    const cleanedNumber = phoneNumber.replace(/[^\d+]/g, '');
+    const cleanedNumber = phoneNumber.replace(/[^\d]/g, '');
+    
+    // Regex pattern matching the Python validation
+    const kenyanNumberRegex = /^(?:254|0)(1[0-5]\d|7\d{2})\d{6}$/;
+    
+    // Try with various formats
+    const formats = [
+      phoneNumber,  // Original input
+      '+' + cleanedNumber,  // With plus sign
+      cleanedNumber,  // Digits only
+      '0' + cleanedNumber.slice(3)  // Local format
+    ];
 
-    // Check if the number matches Kenyan phone number format
-    if (!kenyanPhoneRegex.test(cleanedNumber)) {
-      return {
-        isValid: false,
-        error: 'Invalid Kenyan phone number format',
-        supportedFormats: [
-          '+254712345678',
-          '0712345678',
-          '0112345678'
-        ]
-      };
+    for (const format of formats) {
+      if (kenyanNumberRegex.test(format)) {
+        // Successful validation
+        logger.info('PHONE_NUMBER_VALIDATION_SUCCESS', {
+          originalNumber: phoneNumber,
+          validatedFormat: format
+        });
+        
+        // Normalize to +254 format
+        let normalizedNumber;
+        if (format.startsWith('0')) {
+          normalizedNumber = '+254' + format.slice(1);
+        } else if (format.startsWith('254')) {
+          normalizedNumber = '+' + format;
+        } else {
+          normalizedNumber = format;
+        }
+
+        return {
+          isValid: true,
+          normalizedNumber: normalizedNumber,
+          formattedNumber: normalizedNumber,  
+          originalNumber: phoneNumber
+        };
+      }
     }
 
-    // Normalize to +254 format
-    let formattedNumber = cleanedNumber;
-    if (formattedNumber.startsWith('0')) {
-      formattedNumber = '+254' + formattedNumber.slice(1);
-    }
+    // Validation failed
+    logger.error('PHONE_NUMBER_VALIDATION_FAILED', {
+      originalNumber: phoneNumber,
+      attemptedFormats: formats
+    });
 
     return {
-      isValid: true,
-      formattedNumber: formattedNumber,
-      nationalNumber: formattedNumber.slice(4)
+      isValid: false,
+      error: 'Invalid Kenyan phone number format',
+      supportedFormats: this.getSupportedPrefixes()
     };
   },
 
@@ -45,9 +68,9 @@ export const phoneValidator = {
    * @returns {boolean} Whether the phone number is valid
    */
   isValidKenyanNumber(phoneNumber) {
-    // Exact Kenyan phone number regex
-    const kenyanPhoneRegex = /^(?:\+254|0)(1[0-5]\d|7\d{2})\d{6}$/;
-    return kenyanPhoneRegex.test(phoneNumber.replace(/[^\d+]/g, ''));
+    // Regex pattern matching the Python validation
+    const kenyanNumberRegex = /^(?:254|0)(1[0-5]\d|7\d{2})\d{6}$/;
+    return kenyanNumberRegex.test(phoneNumber.replace(/[^\d]/g, ''));
   },
 
   /**
@@ -56,10 +79,11 @@ export const phoneValidator = {
    */
   getSupportedPrefixes() {
     return [
-      '+2547', // Safaricom
-      '+2541', // Airtel
-      '07',    // Safaricom local
-      '01'     // Airtel local
+      '+254712345678',
+      '0712345678',
+      '0112345678'
     ];
   }
 };
+
+export default phoneValidator;

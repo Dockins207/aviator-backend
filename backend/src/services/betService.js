@@ -1,105 +1,251 @@
+import { v4 as uuidv4 } from 'uuid';
 import gameService from './gameService.js';
 import gameUtils from '../utils/gameUtils.js';
+import logger from '../config/logger.js';
 import { WalletRepository } from '../repositories/walletRepository.js';
 import GameRepository from '../repositories/gameRepository.js';
-import logger from '../config/logger.js';
+import RedisRepository from '../repositories/redisRepository.js';
+
+// Custom validation error class
+class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
 
 class BetService {
   constructor() {
     // Current game bets
     this.currentBets = [];
+    // Successful bets that can be cashed out
+    this.activeBets = [];
   }
 
   /**
-   * Place a bet for the current game
+   * Place a bet with user-triggered activation flag
    * @param {Object} betData - Bet details
    * @returns {Object} Bet placement result
    */
-  placeBet(betData) {
-    const currentGameState = gameService.getCurrentGameState();
+  async placeBet(betData) {
+    try {
+      const currentGameState = gameService.getCurrentGameState();
 
-    // Only allow bets during betting phase
-    if (currentGameState.status !== 'betting') {
-      throw new Error('Betting is closed');
+      // STRICT: Only allow bets during BETTING or CRASHED states
+      const allowedStates = ['betting', 'crashed'];
+      if (!allowedStates.includes(currentGameState.status)) {
+        const errorMsg = `Betting not allowed in ${currentGameState.status} state`;
+        logger.error(errorMsg, { 
+          currentState: currentGameState.status,
+          allowedStates: allowedStates
+        });
+        throw new ValidationError(errorMsg);
+      }
+
+      // Validate user ID and bet amount
+      if (!betData.user) {
+        throw new ValidationError('User ID is required');
+      }
+
+      const MIN_BET = 10;  // Minimum bet amount
+      const MAX_BET = 1000;  // Maximum bet amount
+      if (!betData.amount || betData.amount < MIN_BET) {
+        throw new ValidationError(`Minimum bet amount is ${MIN_BET}`);
+      }
+
+      if (betData.amount > MAX_BET) {
+        throw new ValidationError(`Maximum bet amount is ${MAX_BET}`);
+      }
+
+      // Generate unique bet ID
+      const betId = v4();
+
+      // Validate user's wallet balance
+      const walletRepository = new WalletRepository();
+      const userWallet = await walletRepository.getWalletByUserId(betData.user);
+
+      if (!userWallet || userWallet.balance < betData.amount) {
+        throw new ValidationError('Insufficient wallet balance');
+      }
+
+      // Deduct bet amount from wallet
+      await walletRepository.deductBalance(betData.user, betData.amount);
+
+      // Create bet record
+      const gameRepository = new GameRepository();
+      const currentGameSession = await gameRepository.getCurrentGameSession();
+
+      const betRecord = {
+        playerBetId: betId,
+        userId: betData.user,
+        gameSessionId: currentGameSession.gameSessionId,
+        betAmount: betData.amount,
+        status: 'placed',
+        cashoutMultiplier: null,
+        payoutAmount: null
+      };
+
+      // Save bet to database
+      const savedBet = await gameRepository.createPlayerBet(betRecord);
+
+      // Add to active bets tracking
+      this.currentBets.push(savedBet);
+
+      logger.info('Bet placed successfully', { 
+        userId: savedBet.userId, 
+        gameType: currentGameSession.gameType,
+        betAmount: savedBet.betAmount 
+      });
+
+      return savedBet;
+    } catch (error) {
+      // Handle and log errors
+      logger.error('BET_PLACEMENT_ERROR', {
+        errorMessage: error.message,
+        userId: betData.user,
+        betAmount: betData.amount
+      });
+
+      // Rethrow or handle specific error types
+      if (error instanceof ValidationError) {
+        throw error;
+      }
+
+      throw new Error('Bet placement failed');
     }
+  }
 
-    // Basic bet validation
-    if (!betData.amount || betData.amount <= 0) {
-      throw new Error('Invalid bet amount');
+  async cashoutBet(betId, userId) {
+    try {
+      const gameRepository = new GameRepository();
+      const bet = await gameRepository.getPlayerBetById(betId);
+
+      if (!bet || bet.userId !== userId) {
+        throw new ValidationError('Invalid bet or unauthorized access');
+      }
+
+      // Implement cashout logic
+      const currentGameState = gameService.getCurrentGameState();
+      const cashoutMultiplier = currentGameState.currentMultiplier;
+
+      const updateBetRecord = {
+        playerBetId: betId,
+        status: 'cashout',
+        cashoutMultiplier: cashoutMultiplier,
+        payoutAmount: bet.betAmount * cashoutMultiplier
+      };
+
+      const updatedBet = await gameRepository.updatePlayerBet(updateBetRecord);
+
+      // Credit wallet with cashout amount
+      const walletRepository = new WalletRepository();
+      await walletRepository.creditBalance(userId, updatedBet.payoutAmount);
+
+      return updatedBet;
+    } catch (error) {
+      logger.error('BET_CASHOUT_ERROR', {
+        playerBetId: betId,
+        userId,
+        errorMessage: error.message
+      });
+
+      throw error;
     }
-
-    // Create bet object
-    const bet = {
-      id: gameUtils.generateGameUUID(),
-      gameId: currentGameState.gameId,
-      amount: betData.amount,
-      user: betData.user || 'Anonymous',
-      timestamp: Date.now(),
-      status: 'pending'
-    };
-
-    // Add bet to current game
-    this.currentBets.push(bet);
-
-    return {
-      success: true,
-      betId: bet.id,
-      message: 'Bet placed successfully'
-    };
   }
 
   /**
-   * Cashout a bet during the flying phase
-   * @param {Object} cashoutData - Cashout details
-   * @returns {Object} Cashout result
+   * Get active bets based on user-triggered activation
+   * @returns {Array} List of active bets
    */
-  cashoutBet(cashoutData) {
+  async getActiveBets() {
     const currentGameState = gameService.getCurrentGameState();
-
-    // Only allow cashout during flying phase
-    if (currentGameState.status !== 'flying') {
-      throw new Error('Cashout is not available');
+    
+    // Only return user-activated bets during flying state
+    if (currentGameState.status === 'flying') {
+      // Fetch active bets from Redis
+      const activeBets = await RedisRepository.getActiveBets(currentGameState.gameId);
+      
+      return activeBets.filter(bet => 
+        bet.isUserActivated === true
+      );
     }
-
-    // Find the specific bet
-    const betIndex = this.currentBets.findIndex(
-      bet => bet.id === cashoutData.betId
-    );
-
-    if (betIndex === -1) {
-      throw new Error('Bet not found');
-    }
-
-    // Calculate winnings based on current multiplier
-    const bet = this.currentBets[betIndex];
-    const winnings = bet.amount * currentGameState.multiplier;
-
-    // Update bet status
-    bet.status = 'cashed_out';
-    bet.winnings = winnings;
-
-    return {
-      success: true,
-      betId: bet.id,
-      winnings,
-      multiplier: currentGameState.multiplier,
-      message: 'Bet cashed out successfully'
-    };
+    
+    return [];
   }
 
   /**
-   * Get current active bets
+   * Activate bet for cashout during flying phase
+   * @param {string} betId - ID of the bet to activate
+   * @returns {Object} Activation result
+   */
+  activateBetForCashout(betId) {
+    try {
+      const currentGameState = gameService.getCurrentGameState();
+
+      // STRICT: Only allow bet activation during FLYING state
+      if (currentGameState.status !== 'flying') {
+        logger.error('Invalid game state for bet activation', { 
+          currentState: currentGameState.status,
+          expectedState: 'flying'
+        });
+        throw new ValidationError('Bet activation only allowed during flying state');
+      }
+
+      // Find the bet in current bets
+      const betIndex = this.currentBets.findIndex(b => b.id === betId);
+      
+      if (betIndex === -1) {
+        logger.warn('Attempt to activate non-existent bet', { betId });
+        throw new ValidationError('Bet not found');
+      }
+
+      // Mark bet as user-activated
+      this.currentBets[betIndex].isUserActivated = true;
+
+      return {
+        success: true,
+        betId: this.currentBets[betIndex].id,
+        message: 'Bet activated and ready for cashout'
+      };
+    } catch (error) {
+      logger.error('Error activating bet for cashout', { 
+        betId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get current bets
    * @returns {Array} List of current bets
    */
   getCurrentBets() {
-    return this.currentBets;
+    try {
+      return this.currentBets;
+    } catch (error) {
+      logger.error('Error retrieving current bets', { 
+        error: error.message,
+        stack: error.stack
+      });
+      return [];
+    }
   }
 
   /**
    * Reset bets between game cycles
    */
   resetBets() {
-    this.currentBets = [];
+    try {
+      // Remove all bets when resetting
+      this.currentBets = [];
+    } catch (error) {
+      logger.error('Error resetting bets', { 
+        error: error.message,
+        stack: error.stack
+      });
+    }
   }
 
   static async placeBet(userId, betAmount, gameType) {
@@ -110,7 +256,11 @@ class BetService {
       // Create game record
       const gameId = await GameRepository.createGameRecord(userId, gameType, betAmount);
 
-      logger.info('Bet placed successfully', { userId, betAmount, gameType });
+      logger.info('Bet placed successfully', { 
+        userId, 
+        gameType,
+        betAmount 
+      });
 
       return {
         success: true,
@@ -137,7 +287,11 @@ class BetService {
         // Update game record
         await GameRepository.updateGameOutcome(gameId, 'WIN', winAmount);
 
-        logger.info('Game won successfully', { userId, gameId, winAmount });
+        logger.info('Game won successfully', { 
+          userId, 
+          gameId, 
+          winAmount 
+        });
 
         return {
           success: true,
@@ -149,7 +303,10 @@ class BetService {
       // If user lost, just update game record
       await GameRepository.updateGameOutcome(gameId, 'LOSS', 0);
 
-      logger.info('Game lost', { userId, gameId });
+      logger.info('Game lost', { 
+        userId, 
+        gameId 
+      });
 
       return {
         success: true,

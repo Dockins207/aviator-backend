@@ -1,48 +1,50 @@
-# Aviator Database
+# Aviator Backend Database Management
 
-## Prerequisites
-- PostgreSQL 13+
-- Node.js 18+
+## Database Setup and Migration
 
-## Setup
+### Prerequisites
+- PostgreSQL installed
+- PostgreSQL user 'admin' created
+- Bash shell
 
-1. Create PostgreSQL Database
+### Setup Script
+
+The `scripts/db_setup.sh` script automates database creation and migration:
+
 ```bash
-createdb aviator
-createuser aviator_admin
+# Navigate to the scripts directory
+cd database/scripts
+
+# Make script executable (if not already)
+chmod +x db_setup.sh
+
+# Run the setup script
+./db_setup.sh
 ```
 
-2. Install Dependencies
-```bash
-npm install
-```
+### What the Script Does
+1. Checks PostgreSQL installation
+2. Creates `aviator_db` database if not exists
+3. Grants privileges to 'admin' user
+4. Runs migrations in order
+5. Verifies database setup
 
-## Database Migrations
+### Migrations
+- Migrations are SQL files in the `migrations/` directory
+- Sorted and applied in numerical order
+- Each migration should be idempotent
 
-Run migrations:
-```bash
-npm run migrate
-```
+### Troubleshooting
+- Ensure PostgreSQL is running
+- Verify database user permissions
+- Check migration files for SQL syntax errors
 
-Rollback last migration:
-```bash
-npm run migrate:down
-```
+### Configuration
+Modify script variables for custom:
+- Database name
+- Database user
+- Migration directory
 
-Create new migration:
-```bash
-npm run migrate:create migration_name
-```
-
-## Seeding Data
-
-Seed initial data:
-```bash
-npm run seed
-```
-
-## Database Structure
-- `migrations/`: Database schema changes
-- `seeds/`: Initial data population
-- `schemas/`: Optional schema definitions
-- `queries/`: Complex or reusable SQL queries
+## Contributing
+- Add new migrations with sequential numbering
+- Test migrations before committing

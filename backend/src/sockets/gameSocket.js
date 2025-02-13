@@ -1,10 +1,15 @@
 import gameService from '../services/gameService.js';
 import gameUtils from '../utils/gameUtils.js';
+import betService from '../services/betService.js';
+import logger from '../config/logger.js'; // Assuming logger is defined in this file
 
 class GameSocket {
   constructor(io) {
     // Store the Socket.IO instance
     this.io = io;
+
+    // Store bet service
+    this.betService = betService;
 
     // Game state broadcast interval
     this.gameStateBroadcastInterval = null;
@@ -40,24 +45,45 @@ class GameSocket {
     gameService.startGameCycle();
 
     // Broadcast game states in real-time
-    this.gameStateBroadcastInterval = setInterval(() => {
+    this.gameStateBroadcastInterval = setInterval(async () => {
       try {
         const currentGameState = gameService.getCurrentGameState();
         
-        // Broadcast different states
-        switch(currentGameState.status) {
-          case 'betting':
-            this.broadcastBettingPhase(currentGameState);
-            break;
-          case 'flying':
-            this.broadcastFlyingPhase(currentGameState);
-            break;
-          case 'crashed':
-            this.broadcastCrashedPhase(currentGameState);
-            break;
+        // Validate game state
+        if (!currentGameState || !currentGameState.status) {
+          return;
+        }
+
+        // Broadcast different states with additional error handling
+        try {
+          switch(currentGameState.status) {
+            case 'betting':
+              this.broadcastBettingPhase(currentGameState);
+              break;
+            case 'flying':
+              await this.broadcastFlyingPhase(currentGameState);
+              break;
+            case 'crashed':
+              this.broadcastCrashedPhase(currentGameState);
+              break;
+            default:
+              logger.warn('[GAME_SOCKET] Unknown game state', { 
+                status: currentGameState.status,
+                gameState: JSON.stringify(currentGameState)
+              });
+          }
+        } catch (broadcastError) {
+          logger.error('[GAME_SOCKET] Error broadcasting specific game state', {
+            status: currentGameState.status,
+            errorMessage: broadcastError.message,
+            errorStack: broadcastError.stack
+          });
         }
       } catch (error) {
-        console.error('[GAME_SOCKET] Error broadcasting game state:', error);
+        logger.error('[GAME_SOCKET] Error retrieving or broadcasting game state:', {
+          errorMessage: error.message,
+          errorStack: error.stack
+        });
       }
     }, 100); // Update every 100ms for smooth progression
   }
@@ -67,65 +93,168 @@ class GameSocket {
   }
 
   broadcastBettingPhase(gameState) {
-    // Broadcast betting phase with enhanced details
-    this.io.emit('gameStateUpdate', {
-      status: 'betting',
-      gameId: gameState.gameId,
-      multiplier: 1.00,  // Always 1.00 in betting phase
-      countdown: gameState.countdown,
-      crashPoint: gameState.crashPoint.toFixed(2),
-      players: gameState.players.length,
-      betPhaseDetails: {
-        remainingTime: gameState.countdown,
-        startTime: Date.now()
+    try {
+      // Ensure gameState and its properties exist
+      if (!gameState) {
+        logger.warn('[GAME_SOCKET] Attempted to broadcast undefined game state');
+        return;
       }
-    });
+
+      // Safely get players count, defaulting to 0 if undefined
+      const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
+
+      // Broadcast betting phase with button state control
+      this.io.emit('gameStateUpdate', {
+        status: 'betting',
+        gameId: gameState.gameId || null,
+        multiplier: 1.00,  // Always 1.00 in betting phase
+        countdown: gameState.countdown || 5,
+        crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+        players: playerCount,
+        buttonState: {
+          placeBet: true,    // Always enable place bet button
+          cashOut: false,    // Disable cashout button
+          nextAction: 'placeBet'
+        },
+        betPhaseDetails: {
+          remainingTime: gameState.countdown || 5,
+          startTime: gameState.startTime || Date.now()
+        }
+      });
+    } catch (error) {
+      logger.error('[GAME_SOCKET] Error in broadcastBettingPhase', {
+        errorMessage: error.message,
+        errorStack: error.stack,
+        gameState: JSON.stringify(gameState)
+      });
+    }
   }
 
-  broadcastFlyingPhase(gameState) {
-    // Broadcast flying phase with enhanced details
-    this.io.emit('gameStateUpdate', {
-      status: 'flying',
-      gameId: gameState.gameId,
-      multiplier: gameState.multiplier.toFixed(2),
-      countdown: 0,  // No countdown in flying phase
-      crashPoint: gameState.crashPoint.toFixed(2),
-      players: gameState.players.length,
-      flyingPhaseDetails: {
-        startTime: gameState.startTime,
-        elapsedTime: Date.now() - gameState.startTime
+  async broadcastFlyingPhase(gameState) {
+    try {
+      // Safely get active bets or use an empty array
+      let activeBets = [];
+      if (this.betService && typeof this.betService.getActiveBets === 'function') {
+        try {
+          const rawActiveBets = await this.betService.getActiveBets();
+          activeBets = Array.isArray(rawActiveBets) ? rawActiveBets : [];
+        } catch (betError) {
+          logger.warn('[GAME_SOCKET] Error fetching active bets', {
+            errorMessage: betError.message,
+            errorStack: betError.stack
+          });
+        }
       }
-    });
+
+      // Safely get players count, defaulting to 0 if undefined
+      const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
+
+      // Broadcast flying phase with button state control and active bets
+      this.io.emit('gameStateUpdate', {
+        status: 'flying',
+        gameId: gameState.gameId || null,
+        multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
+        countdown: 0,  // No countdown in flying phase
+        crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+        players: playerCount,
+        buttonState: {
+          placeBet: false,   // Disable place bet button
+          cashOut: activeBets.length > 0,  // Enable cashout only if active bets exist
+          nextAction: activeBets.length > 0 ? 'cashOut' : null
+        },
+        activeBets: activeBets.map(bet => ({
+          id: bet.id || null,
+          amount: bet.amount || 0,
+          user: bet.user || null
+        })),
+        flyingPhaseDetails: {
+          startTime: gameState.startTime || Date.now(),
+          elapsedTime: Date.now() - (gameState.startTime || Date.now())
+        }
+      });
+    } catch (error) {
+      logger.error('[GAME_SOCKET] Error in broadcastFlyingPhase', {
+        errorMessage: error.message,
+        errorStack: error.stack,
+        gameState: JSON.stringify(gameState)
+      });
+    }
   }
 
   broadcastCrashedPhase(gameState) {
-    // Broadcast crashed phase with enhanced details
-    this.io.emit('gameStateUpdate', {
-      status: 'crashed',
-      gameId: gameState.gameId,
-      multiplier: gameState.multiplier.toFixed(2),
-      countdown: 0,  // No countdown in crashed phase
-      crashPoint: gameState.crashPoint.toFixed(2),
-      players: gameState.players.length,
-      crashDetails: {
-        crashMultiplier: `@${gameState.crashPoint.toFixed(2)}x`,
-        gameDuration: Date.now() - gameState.startTime
-      }
-    });
+    try {
+      // Safely get players count, defaulting to 0 if undefined
+      const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
+
+      // Broadcast crashed phase with button state control
+      this.io.emit('gameStateUpdate', {
+        status: 'crashed',
+        gameId: gameState.gameId || null,
+        multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
+        countdown: 0,  // No countdown in crashed phase
+        crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+        players: playerCount,
+        buttonState: {
+          placeBet: true,    // Always enable place bet button
+          cashOut: false,    // Disable cashout button
+          nextAction: 'placeBet'
+        },
+        crashDetails: {
+          crashMultiplier: `@${gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00'}x`,
+          gameDuration: Date.now() - (gameState.startTime || Date.now())
+        }
+      });
+    } catch (error) {
+      logger.error('[GAME_SOCKET] Error in broadcastCrashedPhase', {
+        errorMessage: error.message,
+        errorStack: error.stack,
+        gameState: JSON.stringify(gameState)
+      });
+    }
+  }
+
+  /**
+   * Broadcast when a bet is activated for cashout
+   * @param {Object} bet - Bet that has been activated
+   */
+  broadcastBetActivation(bet) {
+    try {
+      this.io.emit('betActivated', {
+        betId: bet.id,
+        amount: bet.amount,
+        user: bet.user,
+        timestamp: Date.now()
+      });
+    } catch (error) {
+      logger.error('[GAME_SOCKET] Error in broadcastBetActivation', {
+        errorMessage: error.message,
+        errorStack: error.stack,
+        bet: JSON.stringify(bet)
+      });
+    }
   }
 
   calculatePlayerResult(player, crashPoint) {
-    // Determine if player won or lost based on cash out point
-    if (player.cashOutPoint && player.cashOutPoint < crashPoint) {
-      return {
-        status: 'won',
-        winnings: Number((player.betAmount * player.cashOutPoint).toFixed(2))
-      };
-    } else {
-      return {
-        status: 'lost',
-        winnings: 0
-      };
+    try {
+      // Determine if player won or lost based on cash out point
+      if (player.cashOutPoint && player.cashOutPoint < crashPoint) {
+        return {
+          status: 'won',
+          winnings: Number((player.betAmount * player.cashOutPoint).toFixed(2))
+        };
+      } else {
+        return {
+          status: 'lost',
+          winnings: 0
+        };
+      }
+    } catch (error) {
+      logger.error('[GAME_SOCKET] Error in calculatePlayerResult', {
+        errorMessage: error.message,
+        errorStack: error.stack,
+        player: JSON.stringify(player),
+        crashPoint: crashPoint
+      });
     }
   }
 }
