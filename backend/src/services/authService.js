@@ -290,6 +290,13 @@ export const authService = {
         throw new Error('Failed to create user account');
       }
 
+      // Create wallet for the new user
+      const createWalletQuery = `
+        INSERT INTO wallets (user_id, balance, currency)
+        VALUES ($1, 0, 'KSH')
+      `;
+      await pool.query(createWalletQuery, [userId]);
+
       logger.info('REGISTER_SUCCESS', {
         userId: result.rows[0].user_id,
         phoneNumber: result.rows[0].phone_number

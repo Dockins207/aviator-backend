@@ -2,8 +2,16 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Create user roles enum
-CREATE TYPE user_role AS ENUM ('player', 'admin', 'support', 'moderator');
-CREATE TYPE verification_status AS ENUM ('unverified', 'pending', 'verified');
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
+        CREATE TYPE user_role AS ENUM ('player', 'admin', 'support', 'moderator');
+    END IF;
+    
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'verification_status') THEN
+        CREATE TYPE verification_status AS ENUM ('unverified', 'pending', 'verified');
+    END IF;
+END $$;
 
 -- Create users table
 CREATE TABLE users (

@@ -3,7 +3,7 @@ import { authService } from '../services/authService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import phoneValidator from '../utils/phoneValidator.js';
-import walletService from '../services/walletService.js'; // Update walletService import
+import { walletService } from '../services/walletService.js'; // Update walletService import
 
 const router = express.Router();
 

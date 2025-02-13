@@ -1,7 +1,7 @@
 import { WalletRepository } from '../repositories/walletRepository.js';
 import logger from '../config/logger.js';
 
-const walletService = {
+export const walletService = {
   // Initialize wallet for a new user during registration
   async initializeWallet(userId) {
     try {
@@ -332,5 +332,3 @@ const walletService = {
     }
   },
 };
-
-export default walletService;

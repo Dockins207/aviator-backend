@@ -1,5 +1,5 @@
 import express from 'express';
-import { walletService } from '../services/walletService.js';
+import { walletService as WalletService } from '../services/walletService.js';
 import { WalletRepository } from '../repositories/walletRepository.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import logger from '../config/logger.js';
@@ -9,7 +9,7 @@ const router = express.Router();
 // Get user wallet balance
 router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user.user_id;
     const balance = await WalletRepository.getUserBalance(userId);
 
     res.status(200).json({
@@ -40,7 +40,7 @@ router.post('/deposit', authMiddleware.authenticateToken, async (req, res) => {
       });
     }
 
-    const result = await walletService.deposit(
+    const result = await WalletService.deposit(
       userId, 
       parseFloat(amount), 
       description || 'Manual Deposit'
@@ -80,7 +80,7 @@ router.post('/withdraw', authMiddleware.authenticateToken, async (req, res) => {
       });
     }
 
-    const result = await walletService.withdraw(
+    const result = await WalletService.withdraw(
       userId, 
       parseFloat(amount), 
       description || 'Manual Withdrawal'
@@ -113,7 +113,7 @@ router.get('/transactions', authMiddleware.authenticateToken, async (req, res) =
     const userId = req.user.id;
     const { limit = 50, offset = 0 } = req.query;
 
-    const transactions = await walletService.getTransactionHistory(
+    const transactions = await WalletService.getTransactionHistory(
       userId, 
       parseInt(limit), 
       parseInt(offset)

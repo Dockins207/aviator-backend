@@ -1,9 +1,15 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create player_bets table
-CREATE TYPE bet_status AS ENUM ('placed', 'won', 'lost', 'cashout');
+-- Create bet status enum
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'bet_status') THEN
+        CREATE TYPE bet_status AS ENUM ('placed', 'won', 'lost', 'cashout');
+    END IF;
+END $$;
 
+-- Create player_bets table
 CREATE TABLE player_bets (
     player_bet_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,

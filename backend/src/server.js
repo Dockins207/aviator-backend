@@ -10,6 +10,8 @@ import { pool, connectWithRetry } from './config/database.js';
 import gameService from './services/gameService.js';
 import errorMiddleware from './middleware/errorMiddleware.js';
 import authRoutes from './routes/authRoutes.js';
+import gameRoutes from './routes/gameRoutes.js';
+import walletRoutes from './routes/walletRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -139,6 +141,8 @@ async function startServer() {
 
     // Basic routes
     app.use('/api/auth', authRoutes);
+    app.use('/api/game', gameRoutes);
+    app.use('/api/wallet', walletRoutes);
     app.get('/', (req, res) => {
       res.json({ 
         message: 'Aviator Game Backend', 
