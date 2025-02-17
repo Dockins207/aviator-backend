@@ -9,6 +9,14 @@ class RedisConnection {
       // password: process.env.REDIS_PASSWORD
     });
 
+    // Metrics tracking
+    this.metrics = {
+      totalBetsReceived: 0,
+      totalBetAmount: 0,
+      gameSessionBetCounts: {},
+      lastLoggedBetCount: 0
+    };
+
     this.client.on('error', (err) => {
       logger.error('Redis Client Error', { 
         errorMessage: err.message,
@@ -18,11 +26,68 @@ class RedisConnection {
 
     this.client.on('connect', () => {
       logger.info('Redis connection established');
+      this.resetMetrics();
     });
 
     // Track connection state
     this._isConnecting = false;
     this._connectionPromise = null;
+  }
+
+  // Reset metrics periodically or on demand
+  resetMetrics() {
+    this.metrics = {
+      totalBetsReceived: 0,
+      totalBetAmount: 0,
+      gameSessionBetCounts: {},
+      lastLoggedBetCount: 0
+    };
+    this.logMetrics();
+  }
+
+  // Log current metrics only when there are new bets
+  logMetrics() {
+    const newBetsSinceLastLog = this.metrics.totalBetsReceived - this.metrics.lastLoggedBetCount;
+    
+    if (newBetsSinceLastLog > 0) {
+      logger.info('REDIS_BET_METRICS', {
+        totalBetsReceived: this.metrics.totalBetsReceived,
+        totalBetAmount: this.metrics.totalBetAmount,
+        newBetsSinceLastLog,
+        gameSessionBetCounts: Object.entries(this.metrics.gameSessionBetCounts)
+          .map(([gameSessionId, counts]) => ({
+            gameSessionId,
+            ...counts
+          }))
+      });
+
+      // Update last logged bet count
+      this.metrics.lastLoggedBetCount = this.metrics.totalBetsReceived;
+    }
+  }
+
+  // Track bet metrics
+  trackBetMetrics(gameSessionId, betAmount) {
+    // Increment total bets
+    this.metrics.totalBetsReceived++;
+    this.metrics.totalBetAmount += betAmount;
+
+    // Track bets per game session
+    if (!this.metrics.gameSessionBetCounts[gameSessionId]) {
+      this.metrics.gameSessionBetCounts[gameSessionId] = {
+        betCount: 0,
+        totalAmount: 0
+      };
+    }
+    
+    const sessionMetrics = this.metrics.gameSessionBetCounts[gameSessionId];
+    sessionMetrics.betCount++;
+    sessionMetrics.totalAmount += betAmount;
+
+    // Log metrics every 10 bets
+    if (this.metrics.totalBetsReceived % 10 === 0) {
+      this.logMetrics();
+    }
   }
 
   async connect() {
@@ -54,6 +119,8 @@ class RedisConnection {
   }
 
   async disconnect() {
+    // Log final metrics before disconnecting
+    this.logMetrics();
     if (this.client.isOpen) {
       await this.client.quit();
     }

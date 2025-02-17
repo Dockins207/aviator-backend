@@ -10,7 +10,9 @@
     "build": "echo 'Preparing backend for production...' && npm run migrate",
     "migrate": "node --experimental-specifier-resolution=node ../database/scripts/migrate.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:redis": "node --experimental-specifier-resolution=node tests/redisIntegration.test.js"
+    "test:redis": "node --experimental-specifier-resolution=node tests/redisIntegration.test.js",
+    "redis": "node redis-server.js",
+    "redis:dev": "nodemon redis-server.js"
   },
   "keywords": [],
   "author": "",

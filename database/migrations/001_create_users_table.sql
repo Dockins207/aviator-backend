@@ -16,21 +16,27 @@ END $$;
 -- Create users table
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    username VARCHAR(50) UNIQUE NOT NULL,
-    phone_number VARCHAR(15) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE,
+    username VARCHAR(50) NOT NULL,
+    phone_number VARCHAR(15) NOT NULL,
+    email VARCHAR(100),
     password_hash VARCHAR(255) NOT NULL,
     salt VARCHAR(50) NOT NULL,
     role user_role DEFAULT 'player',
     verification_status verification_status DEFAULT 'unverified',
     is_active BOOLEAN DEFAULT TRUE,
     profile_picture_url TEXT,
-    referral_code VARCHAR(20) UNIQUE,
+    referral_code VARCHAR(20),
     referred_by UUID REFERENCES users(user_id),
     last_login TIMESTAMP WITH TIME ZONE,
     last_password_change TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+
+    -- Add explicit unique constraints
+    CONSTRAINT unique_username UNIQUE (username),
+    CONSTRAINT unique_phone_number UNIQUE (phone_number),
+    CONSTRAINT unique_email UNIQUE (email),
+    CONSTRAINT unique_referral_code UNIQUE (referral_code)
 );
 
 -- Create indexes for faster lookups
@@ -39,38 +45,6 @@ CREATE INDEX idx_users_phone ON users(phone_number);
 CREATE INDEX idx_users_role ON users(role);
 CREATE INDEX idx_users_verification_status ON users(verification_status);
 CREATE INDEX idx_users_referral ON users(referral_code);
-
--- Create user activity logs table
-CREATE TABLE user_activity_logs (
-    log_id SERIAL PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    activity_type VARCHAR(50) NOT NULL,
-    ip_address VARCHAR(45),
-    user_agent TEXT,
-    location JSONB,
-    device_info JSONB,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create indexes for user activity logs
-CREATE INDEX idx_user_activity_logs_user_id ON user_activity_logs(user_id);
-CREATE INDEX idx_user_activity_logs_timestamp ON user_activity_logs(timestamp);
-CREATE INDEX idx_user_activity_logs_type ON user_activity_logs(activity_type);
-
--- Create user verification tokens table
-CREATE TABLE user_verification_tokens (
-    token_id SERIAL PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    token VARCHAR(255) NOT NULL,
-    type VARCHAR(50) NOT NULL, -- 'email', 'phone', 'password_reset'
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create indexes for verification tokens
-CREATE INDEX idx_verification_tokens_user ON user_verification_tokens(user_id);
-CREATE INDEX idx_verification_tokens_token ON user_verification_tokens(token);
-CREATE INDEX idx_verification_tokens_type ON user_verification_tokens(type);
 
 -- Create a function to update the updated_at column
 CREATE OR REPLACE FUNCTION update_modified_column()

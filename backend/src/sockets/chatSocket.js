@@ -5,11 +5,7 @@ export default function chatSocket(io) {
   const chatNamespace = io.of('/chat');
 
   chatNamespace.on('connection', (socket) => {
-    console.log(`[CHAT_SOCKET] New client connected: ${socket.id}`);
-
     socket.on('sendMessage', (message) => {
-      console.log(`[CHAT_SOCKET] Message received from ${socket.id}`);
-      
       // Generate unique message ID and version to prevent hydration
       const messageId = crypto.randomBytes(16).toString('hex');
       const messageVersion = Date.now();
@@ -26,7 +22,6 @@ export default function chatSocket(io) {
     });
 
     socket.on('disconnect', () => {
-      console.log(`[CHAT_SOCKET] Client disconnected: ${socket.id}`);
     });
   });
 }

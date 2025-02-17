@@ -6,17 +6,19 @@ import bcrypt from 'bcryptjs';
 export class UserRepository {
   // Create a new user
   static async createUser(username, phoneNumber, password) {
-    // Generate hashed password
+    // Generate salt and hashed password
     const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const salt = await bcrypt.genSalt(saltRounds);
+    const hashedPassword = await bcrypt.hash(password, salt);
     
     const query = `
       INSERT INTO users (
         username, 
         phone_number, 
         password_hash, 
+        salt,
         is_active
-      ) VALUES ($1, $2, $3, TRUE) 
+      ) VALUES ($1, $2, $3, $4, TRUE) 
       RETURNING *
     `;
 
@@ -24,7 +26,8 @@ export class UserRepository {
       const result = await pool.query(query, [
         username, 
         phoneNumber, 
-        hashedPassword
+        hashedPassword,
+        salt
       ]);
 
       return result.rows.length > 0 ? User.fromRow(result.rows[0]) : null;

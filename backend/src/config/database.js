@@ -1,13 +1,14 @@
-import pg from 'pg';
+import pkg from 'pg';
+const { Pool } = pkg;
 import logger from './logger.js';
 
 // Create a new pool using the connection string
-const pool = new pg.Pool({
-  host: 'localhost',
-  port: 5432,
-  database: 'aviator_db',
-  user: 'admin',
-  password: '2020',
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
+  database: process.env.DB_NAME || 'aviator_db',
+  user: process.env.DB_USER || 'admin',
+  password: process.env.DB_PASSWORD || '2020',
   
   // Enhanced pool configuration for persistence
   max: 20, // maximum number of clients in the pool
@@ -45,10 +46,10 @@ async function connectWithRetry(maxRetries = 5) {
         error: err.message,
         attempt: attempt,
         maxRetries: maxRetries,
-        host: 'localhost',
-        port: 5432,
-        database: 'aviator_db',
-        user: 'admin',
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
+        database: process.env.DB_NAME || 'aviator_db',
+        user: process.env.DB_USER || 'admin',
       });
       
       // Wait before retrying (exponential backoff)
@@ -57,10 +58,10 @@ async function connectWithRetry(maxRetries = 5) {
   }
   
   logger.databaseError('Failed to connect to the database after multiple attempts', {
-    host: 'localhost',
-    port: 5432,
-    database: 'aviator_db',
-    user: 'admin',
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
+    database: process.env.DB_NAME || 'aviator_db',
+    user: process.env.DB_USER || 'admin',
   });
   return false;
 }
@@ -80,10 +81,10 @@ const connectionHealthCheck = setInterval(async () => {
   } catch (err) {
     logger.error('Database connection lost', { 
       error: err.message,
-      host: 'localhost',
-      port: 5432,
-      database: 'aviator_db',
-      user: 'admin',
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
+      database: process.env.DB_NAME || 'aviator_db',
+      user: process.env.DB_USER || 'admin',
     });
     isConnected = false;
   }
@@ -92,10 +93,10 @@ const connectionHealthCheck = setInterval(async () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   logger.info('Closing database connection pool', {
-    host: 'localhost',
-    port: 5432,
-    database: 'aviator_db',
-    user: 'admin',
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
+    database: process.env.DB_NAME || 'aviator_db',
+    user: process.env.DB_USER || 'admin',
   });
   clearInterval(connectionHealthCheck);
   await pool.end();

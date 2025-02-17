@@ -6,10 +6,32 @@ export const walletService = {
   async initializeWallet(userId) {
     try {
       const wallet = await WalletRepository.createWallet(userId);
-      logger.info('Wallet initialized', { userId, walletId: wallet.id });
       return wallet;
     } catch (error) {
       logger.error('Wallet initialization failed', { 
+        userId, 
+        errorMessage: error.message 
+      });
+      throw error;
+    }
+  },
+
+  // Create wallet for a user if not exists
+  async createWallet(userId) {
+    try {
+      const wallet = await WalletRepository.createWallet(userId);
+      
+      if (!wallet) {
+        logger.error('Wallet creation failed', { 
+          userId, 
+          errorMessage: 'Unable to create wallet' 
+        });
+        throw new Error('Unable to create wallet');
+      }
+
+      return wallet;
+    } catch (error) {
+      logger.error('Wallet creation failed', { 
         userId, 
         errorMessage: error.message 
       });
@@ -49,18 +71,22 @@ export const walletService = {
       }
 
       const result = await WalletRepository.deposit(userId, amount, description);
-      logger.info('Deposit successful', { 
-        userId, 
-        amount, 
-        currency: 'KSH',
-        newBalance: result.wallet.balance 
-      });
+      
+      // Track wallet event via socket if WalletRepository has socket reference
+      if (WalletRepository.walletSocket) {
+        await WalletRepository.walletSocket.trackWalletEvent(
+          userId, 
+          'deposit', 
+          amount, 
+          description || 'Manual Deposit'
+        );
+      }
+
       return result;
     } catch (error) {
       logger.error('Deposit failed', { 
         userId, 
-        amount, 
-        currency: 'KSH',
+        amount,
         errorMessage: error.message 
       });
       throw error;
@@ -76,18 +102,22 @@ export const walletService = {
       }
 
       const result = await WalletRepository.withdraw(userId, amount, description);
-      logger.info('Withdrawal successful', { 
-        userId, 
-        amount, 
-        currency: 'KSH',
-        newBalance: result.wallet.balance 
-      });
+      
+      // Track wallet event via socket if WalletRepository has socket reference
+      if (WalletRepository.walletSocket) {
+        await WalletRepository.walletSocket.trackWalletEvent(
+          userId, 
+          'withdrawal', 
+          amount, 
+          description || 'Manual Withdrawal'
+        );
+      }
+
       return result;
     } catch (error) {
       logger.error('Withdrawal failed', { 
         userId, 
-        amount, 
-        currency: 'KSH',
+        amount,
         errorMessage: error.message 
       });
       throw error;
@@ -103,13 +133,6 @@ export const walletService = {
       }
 
       const result = await WalletRepository.placeBet(userId, betAmount, gameId);
-      logger.info('Bet placed successfully', { 
-        userId, 
-        betAmount, 
-        currency: 'KSH',
-        gameId,
-        newBalance: result.wallet.balance 
-      });
       return result;
     } catch (error) {
       logger.error('Bet placement failed', { 
@@ -132,13 +155,6 @@ export const walletService = {
       }
 
       const result = await WalletRepository.processWinnings(userId, winAmount, gameId);
-      logger.info('Winnings processed successfully', { 
-        userId, 
-        winAmount, 
-        currency: 'KSH',
-        gameId,
-        newBalance: result.wallet.balance 
-      });
       return result;
     } catch (error) {
       logger.error('Winnings processing failed', { 
@@ -174,13 +190,6 @@ export const walletService = {
         limit, 
         offset
       );
-      
-      logger.info('Wallet transaction history retrieved', { 
-        userId, 
-        transactionCount: transactions.length,
-        limit,
-        offset
-      });
 
       return {
         userId,
@@ -200,12 +209,11 @@ export const walletService = {
         }
       };
     } catch (error) {
-      logger.error('Failed to retrieve transaction history', { 
+      logger.error('Transaction history retrieval failed', { 
         userId, 
-        limit,
+        limit, 
         offset,
-        errorMessage: error.message,
-        errorStack: error.stack
+        errorMessage: error.message 
       });
       throw error;
     }
@@ -214,41 +222,22 @@ export const walletService = {
   // Get real-time wallet balance for user profile
   async getUserProfileBalance(userId) {
     try {
-      console.log('DEBUG: getUserProfileBalance - Fetching wallet', { userId });
+      const wallet = await WalletRepository.getWalletByUserId(userId);
       
-      const wallet = await this.getWallet(userId);
-      
-      console.log('DEBUG: getUserProfileBalance - Wallet retrieved', { 
-        userId, 
-        wallet: wallet ? {
-          id: wallet.id,
-          userId: wallet.userId,
-          balance: wallet.balance,
-          currency: wallet.currency
-        } : null 
-      });
-      
-      const balanceResponse = {
+      if (!wallet) {
+        throw new Error('Wallet not found');
+      }
+
+      return {
         userId: wallet.userId,
-        balance: wallet.balance,
+        balance: parseFloat(wallet.balance),
         currency: wallet.currency,
         lastUpdated: new Date().toISOString()
       };
-
-      logger.info('User profile balance retrieved', { 
-        userId, 
-        balance: wallet.balance,
-        currency: wallet.currency
-      });
-
-      return balanceResponse;
     } catch (error) {
-      console.error('DEBUG: getUserProfileBalance - Full error', error);
-      
-      logger.error('Failed to retrieve user profile balance', { 
+      logger.error('User profile balance retrieval failed', { 
         userId, 
-        errorMessage: error.message,
-        errorStack: error.stack
+        errorMessage: error.message 
       });
       throw error;
     }
@@ -257,37 +246,17 @@ export const walletService = {
   // Deposit funds into user wallet
   async depositFunds(userId, amount, description = 'Manual Deposit') {
     try {
-      // Validate input
-      if (!userId) {
-        throw new Error('User ID is required');
-      }
-      
-      if (typeof amount !== 'number' || amount <= 0) {
-        throw new Error('Invalid deposit amount. Must be a positive number.');
+      if (amount <= 0) {
+        throw new Error('Deposit amount must be positive');
       }
 
-      // Perform deposit
-      const updatedWallet = await WalletRepository.deposit(userId, amount, description);
-      
-      logger.info('Funds deposited successfully', { 
-        userId, 
-        amount,
-        newBalance: updatedWallet.balance,
-        currency: updatedWallet.currency
-      });
-
-      return {
-        userId: updatedWallet.userId,
-        balance: updatedWallet.balance,
-        currency: updatedWallet.currency,
-        lastUpdated: new Date().toISOString()
-      };
+      const result = await WalletRepository.deposit(userId, amount, description);
+      return result;
     } catch (error) {
-      logger.error('Deposit failed', { 
+      logger.error('Funds deposit failed', { 
         userId, 
-        amount,
-        errorMessage: error.message,
-        errorStack: error.stack
+        amount, 
+        errorMessage: error.message 
       });
       throw error;
     }
@@ -296,39 +265,19 @@ export const walletService = {
   // Withdraw funds from user wallet
   async withdrawFunds(userId, amount, description = 'Manual Withdrawal') {
     try {
-      // Validate input
-      if (!userId) {
-        throw new Error('User ID is required');
-      }
-      
-      if (typeof amount !== 'number' || amount <= 0) {
-        throw new Error('Invalid withdrawal amount. Must be a positive number.');
+      if (amount <= 0) {
+        throw new Error('Withdrawal amount must be positive');
       }
 
-      // Perform withdrawal
-      const updatedWallet = await WalletRepository.withdraw(userId, amount, description);
-      
-      logger.info('Funds withdrawn successfully', { 
-        userId, 
-        amount,
-        newBalance: updatedWallet.balance,
-        currency: updatedWallet.currency
-      });
-
-      return {
-        userId: updatedWallet.userId,
-        balance: updatedWallet.balance,
-        currency: updatedWallet.currency,
-        lastUpdated: new Date().toISOString()
-      };
+      const result = await WalletRepository.withdraw(userId, amount, description);
+      return result;
     } catch (error) {
-      logger.error('Withdrawal failed', { 
+      logger.error('Funds withdrawal failed', { 
         userId, 
-        amount,
-        errorMessage: error.message,
-        errorStack: error.stack
+        amount, 
+        errorMessage: error.message 
       });
       throw error;
     }
-  },
+  }
 };

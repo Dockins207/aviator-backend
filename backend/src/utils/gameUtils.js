@@ -37,8 +37,8 @@ class GameUtils {
       const normalizedValue = hashNumber / 0xFFFFFFFF;
       
       // Implement a non-linear crash point generation
-      const baseCrashPoint = 1.1;  // Minimum crash point
-      const maxCrashPoint = 50;    // Maximum crash point
+      const baseCrashPoint = 5;  // Minimum crash point set to 5
+      const maxCrashPoint = 50;  // Maximum crash point
       
       // Use an exponential distribution with added randomness
       const exponentFactor = -Math.log(normalizedValue || 0.5);
@@ -49,22 +49,20 @@ class GameUtils {
         baseCrashPoint, 
         Math.min(
           maxCrashPoint, 
-          Number((exponentFactor * randomVariation).toFixed(2))
+          Number((exponentFactor * randomVariation + baseCrashPoint).toFixed(2))
         )
       );
       
       return crashPoint;
     } catch (error) {
       console.error('Error generating crash point:', error);
-      return 1.5; // Safe default
+      return 5; // Safe default
     }
   }
 
   // Generate unique game UUID
   generateGameUUID() {
-    const timestamp = Date.now();
-    const randomPart = crypto.randomBytes(4).toString('hex').slice(0, 8);
-    return `${timestamp}-${randomPart}`;
+    return crypto.randomUUID();
   }
 
   // Simulate multiplier progression

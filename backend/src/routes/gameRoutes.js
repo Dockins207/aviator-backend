@@ -7,13 +7,13 @@ import { authMiddleware } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Debugging middleware
-router.use((req, res, next) => {
-  console.log(`[GAME_ROUTE] Received ${req.method} request to ${req.path}`);
-  console.log(`[GAME_ROUTE] Headers:`, req.headers);
-  console.log(`[GAME_ROUTE] Query Params:`, req.query);
+// Middleware to log request details
+function logRequestDetails(req, res, next) {
+  // Removed console.log for request details
   next();
-});
+}
+
+router.use(logRequestDetails);
 
 // Get current game state
 router.get('/state', (req, res) => {

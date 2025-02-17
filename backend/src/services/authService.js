@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
-import phoneValidator from '../utils/phoneValidator.js'; // Import phoneValidator
+import phoneValidator from '../utils/phoneValidator.js'; 
+import { WalletRepository } from '../repositories/walletRepository.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_here';
 const JWT_EXPIRATION = '7d';
@@ -113,46 +114,137 @@ const balanceService = {
         SELECT balance FROM users WHERE user_id = $1
       `;
       const userBalanceResult = await client.query(userBalanceQuery, [userId]);
-      const currentUserBalance = userBalanceResult.rows[0].balance;
+      const currentUserBalance = userBalanceResult.rows[0]?.balance || 0;
 
-      // Create wallet with user's existing balance
-      const createWalletQuery = `
-        INSERT INTO wallets (user_id, balance, currency)
-        VALUES ($1, $2, 'KSH')
-        ON CONFLICT (user_id) DO NOTHING
+      logger.info('Wallet initialization attempt', {
+        userId,
+        userTableBalance: currentUserBalance
+      });
+
+      // Create or update wallet with user's existing balance
+      const upsertWalletQuery = `
+        INSERT INTO wallets (user_id, balance, currency, created_at, updated_at)
+        VALUES ($1, $2, 'KSH', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id) DO UPDATE 
+        SET balance = EXCLUDED.balance, 
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING balance
       `;
-      await client.query(createWalletQuery, [userId, currentUserBalance]);
+      const walletResult = await client.query(upsertWalletQuery, [userId, currentUserBalance]);
 
       // Commit transaction
       await client.query('COMMIT');
 
-      logger.info('Wallet initialized from user balance', { 
+      const finalWalletBalance = walletResult.rows[0]?.balance;
+
+      logger.info('Wallet initialized successfully', { 
         userId, 
-        balance: currentUserBalance 
+        initialBalance: currentUserBalance,
+        finalWalletBalance: finalWalletBalance
       });
 
-      return currentUserBalance;
+      return finalWalletBalance;
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      logger.error('Wallet initialization from user balance failed', { 
+      
+      logger.error('Wallet initialization failed', { 
         userId, 
-        errorMessage: error.message 
+        errorMessage: error.message,
+        errorStack: error.stack
       });
-      throw error;
+
+      // If initialization fails, return 0 to prevent login failure
+      return 0;
     } finally {
       client.release();
     }
-  }
+  },
+
+  // Periodic balance synchronization
+  async syncWalletAndUserBalances() {
+    const traceId = uuidv4();
+    try {
+      logger.info(`[${traceId}] Starting comprehensive balance synchronization`);
+
+      // Query to find discrepancies between wallet and user balances
+      const discrepancyQuery = `
+        SELECT 
+          u.user_id, 
+          u.balance AS user_balance, 
+          w.balance AS wallet_balance,
+          w.updated_at AS wallet_updated_at
+        FROM users u
+        JOIN wallets w ON u.user_id = w.user_id
+        WHERE 
+          ABS(u.balance - w.balance) > 0.01  -- Allow small floating-point differences
+          OR u.balance IS NULL 
+          OR w.balance IS NULL
+      `;
+
+      const discrepancyResult = await pool.query(discrepancyQuery);
+
+      logger.info(`[${traceId}] Balance discrepancies found`, {
+        discrepancyCount: discrepancyResult.rows.length
+      });
+
+      // Sync balances for users with discrepancies
+      for (const discrepancy of discrepancyResult.rows) {
+        const { user_id, wallet_balance, wallet_updated_at } = discrepancy;
+
+        try {
+          // Update user balance from wallet
+          const updateUserQuery = `
+            UPDATE users 
+            SET 
+              balance = $1, 
+              updated_at = $2
+            WHERE user_id = $3
+          `;
+          
+          await pool.query(updateUserQuery, [
+            parseFloat(wallet_balance), 
+            wallet_updated_at, 
+            user_id
+          ]);
+
+          logger.info(`[${traceId}] Balance synchronized for user`, {
+            userId: user_id,
+            newBalance: wallet_balance
+          });
+        } catch (updateError) {
+          logger.error(`[${traceId}] Balance sync failed for user`, {
+            userId: user_id,
+            errorMessage: updateError.message
+          });
+        }
+      }
+
+      return discrepancyResult.rows.length;
+    } catch (error) {
+      logger.error(`[${traceId}] Comprehensive balance sync failed`, {
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  },
+};
+
+const formatBalance = (balance, currency = 'KSH') => {
+  // Ensure balance is a number and format with two decimal places
+  const formattedBalance = Number(balance).toFixed(2);
+  
+  // Return balance with currency symbol before the amount
+  return `${currency} ${formattedBalance}`;
 };
 
 export const authService = {
   async register(username, phoneNumber, password) {
     try {
-      // Log registration attempt with sensitive info redacted
-      logger.info('REGISTER_ATTEMPT', {
-        phoneNumber: phoneNumber.replace(/\d{4}/, '****'),
-        timestamp: new Date().toISOString()
+      logger.info('User registration', {
+        username: username,
+        phoneNumber: phoneNumber.replace(/\d{4}/, '****')
       });
 
       // Validate username length with more detailed logging
@@ -233,46 +325,37 @@ export const authService = {
         throw new Error(validationResult.error);
       }
 
-      // Check if user already exists with more detailed logging
+      // Check if user already exists
       const existingUserQuery = 'SELECT * FROM users WHERE phone_number = $1 OR username = $2';
       const existingUserResult = await pool.query(existingUserQuery, [validationResult.normalizedNumber, username]);
       
       if (existingUserResult.rows.length > 0) {
-        const conflictUsers = existingUserResult.rows;
-        const conflictDetails = conflictUsers.map(user => ({
-          phoneNumberMatch: user.phone_number === validationResult.normalizedNumber,
-          usernameMatch: user.username === username
-        }));
-
-        logger.error('REGISTER_USER_EXISTS', {
-          errorCode: 'USER_ALREADY_EXISTS',
-          existingUserCount: existingUserResult.rows.length,
-          conflictFields: conflictDetails,
-          conflictDetails: {
-            phoneNumberConflict: conflictDetails.some(detail => detail.phoneNumberMatch),
-            usernameConflict: conflictDetails.some(detail => detail.usernameMatch)
-          }
+        logger.error('Registration failed', {
+          reason: 'User already exists'
         });
         throw new Error('User with this phone number or username already exists');
       }
 
-      // Hash password
+      // Generate salt
       const saltRounds = 10;
-      const passwordHash = await bcrypt.hash(password, saltRounds);
+      const salt = await bcrypt.genSalt(saltRounds);
+
+      // Hash password
+      const passwordHash = await bcrypt.hash(password, salt);
 
       // Generate unique user ID
       const userId = uuidv4();
 
       // Insert new user with additional error handling
       const insertQuery = `
-        INSERT INTO users (user_id, username, phone_number, password_hash) 
-        VALUES ($1, $2, $3, $4) 
+        INSERT INTO users (user_id, username, phone_number, password_hash, salt) 
+        VALUES ($1, $2, $3, $4, $5) 
         RETURNING user_id, username, phone_number, role, created_at
       `;
       
       let result;
       try {
-        result = await pool.query(insertQuery, [userId, username, validationResult.normalizedNumber, passwordHash]);
+        result = await pool.query(insertQuery, [userId, username, validationResult.normalizedNumber, passwordHash, saltRounds.toString()]);
       } catch (insertError) {
         logger.error('REGISTER_DATABASE_INSERT_ERROR', {
           errorCode: 'DATABASE_INSERT_FAILED',
@@ -290,16 +373,11 @@ export const authService = {
         throw new Error('Failed to create user account');
       }
 
-      // Create wallet for the new user
-      const createWalletQuery = `
-        INSERT INTO wallets (user_id, balance, currency)
-        VALUES ($1, 0, 'KSH')
-      `;
-      await pool.query(createWalletQuery, [userId]);
+      // Create wallet for the new user using WalletRepository
+      await WalletRepository.createWallet(userId);
 
-      logger.info('REGISTER_SUCCESS', {
-        userId: result.rows[0].user_id,
-        phoneNumber: result.rows[0].phone_number
+      logger.info('User registered successfully', {
+        username: username
       });
 
       return result.rows[0];
@@ -319,23 +397,25 @@ export const authService = {
   },
 
   async login(phoneNumber, password) {
+    // Create a unique trace ID for this login attempt
+    const traceId = crypto.randomUUID();
+
     try {
-      // Log login attempt with sensitive info redacted
-      logger.info('LOGIN_ATTEMPT', {
+      logger.info(`[${traceId}] Login attempt started`, {
         phoneNumber: phoneNumber.replace(/\d{4}/, '****'),
         timestamp: new Date().toISOString()
       });
 
       // Validate password presence
       if (!password) {
-        logger.error('LOGIN_MISSING_PASSWORD');
+        logger.error(`[${traceId}] LOGIN_MISSING_PASSWORD`);
         throw new Error('Password is required');
       }
 
       // Validate phone number
       const validationResult = phoneValidator.validate(phoneNumber);
       if (!validationResult.isValid) {
-        logger.error('LOGIN_INVALID_PHONE_NUMBER', {
+        logger.error(`[${traceId}] LOGIN_INVALID_PHONE_NUMBER`, {
           originalPhoneNumber: phoneNumber,
           validationError: validationResult.error,
           supportedFormats: validationResult.supportedFormats
@@ -351,37 +431,22 @@ export const authService = {
       const userResult = await pool.query(userQuery, [normalizedPhoneNumber]);
 
       if (userResult.rows.length === 0) {
-        // If no user found, try alternative normalization
-        const alternativeQuery = 'SELECT * FROM users WHERE phone_number IN ($1, $2, $3)';
-        const alternativeResult = await pool.query(alternativeQuery, [
-          normalizedPhoneNumber,
-          '+254' + normalizedPhoneNumber.slice(1),
-          normalizedPhoneNumber.slice(1)
-        ]);
-
-        if (alternativeResult.rows.length === 0) {
-          logger.error('LOGIN_USER_NOT_FOUND', {
-            attemptedPhoneNumbers: [
-              normalizedPhoneNumber,
-              '+254' + normalizedPhoneNumber.slice(1),
-              normalizedPhoneNumber.slice(1)
-            ]
-          });
-          throw new Error('Invalid phone number or password');
-        }
-
-        // Use the first matching user
-        userResult.rows[0] = alternativeResult.rows[0];
+        logger.error(`[${traceId}] Login failed`, {
+          reason: 'User not found',
+          phoneNumber: normalizedPhoneNumber
+        });
+        throw new Error('Invalid phone number or password');
       }
 
       const user = userResult.rows[0];
 
-      // Compare passwords
+      // Verify password
       const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+
       if (!isPasswordValid) {
-        logger.error('LOGIN_INVALID_PASSWORD', {
-          userId: user.user_id,
-          phoneNumber: user.phone_number
+        logger.error(`[${traceId}] Login failed`, {
+          reason: 'Invalid password',
+          userId: user.user_id
         });
         throw new Error('Invalid phone number or password');
       }
@@ -389,13 +454,37 @@ export const authService = {
       // Update last login
       await pool.query('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = $1', [user.user_id]);
 
-      // Generate JWT token
+      // Fetch the most recent wallet balance
+      const walletBalanceQuery = `
+        SELECT balance 
+        FROM wallets 
+        WHERE user_id = $1 
+        ORDER BY updated_at DESC 
+        LIMIT 1
+      `;
+      const walletBalanceResult = await pool.query(walletBalanceQuery, [user.user_id]);
+      const currentBalance = walletBalanceResult.rows.length > 0 
+        ? parseFloat(walletBalanceResult.rows[0].balance) 
+        : 0;
+
+      const balanceSource = walletBalanceResult.rows.length > 0 
+        ? 'wallet_balance' 
+        : 'user_balance';
+
+      // Generate JWT token with verified balance and extensive metadata
       const token = jwt.sign(
         { 
           user_id: user.user_id, 
           phone_number: user.phone_number, 
           username: user.username, 
-          role: user.role 
+          role: user.role,
+          balance: currentBalance,  // Raw balance
+          formattedBalance: `KSH ${currentBalance.toFixed(2)}`,  // Formatted balance
+          balance_metadata: {
+            source: balanceSource,
+            timestamp: new Date().toISOString(),
+            trace_id: traceId
+          }
         }, 
         JWT_SECRET, 
         { expiresIn: JWT_EXPIRATION }
@@ -404,17 +493,18 @@ export const authService = {
       // Remove sensitive information
       delete user.password_hash;
 
-      logger.info('LOGIN_SUCCESS', {
+      logger.info(`[${traceId}] Login successful`, {
         userId: user.user_id,
-        phoneNumber: user.phone_number
+        phoneNumber: user.phone_number,
+        balanceInToken: currentBalance,
+        balanceSource: balanceSource
       });
 
       return { user, token };
     } catch (error) {
-      logger.error('LOGIN_FATAL_ERROR', {
-        errorMessage: error.message,
-        errorStack: error.stack,
-        phoneNumberRedacted: phoneNumber.replace(/\d{4}/, '****')
+      logger.error(`[${traceId}] Login error`, {
+        reason: error.message,
+        errorStack: error.stack
       });
       throw error;
     }

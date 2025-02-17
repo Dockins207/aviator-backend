@@ -2,6 +2,7 @@ import express from 'express';
 import betService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
+import GameRepository from '../repositories/gameRepository.js';
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ const betRequestLogger = (req, res, next) => {
 
 // Middleware to log all bet-related request details
 const betRequestDetailsLogger = (req, res, next) => {
-  console.log('[BET_REQUEST_DETAILS]', {
+  logger.info('[BET_REQUEST_DETAILS]', {
     method: req.method,
     path: req.path,
     headers: JSON.stringify(req.headers),
@@ -39,22 +40,17 @@ router.post('/place',
   async (req, res) => {
     try {
       const { amount } = req.body;
+      const userId = req.user ? req.user.user_id : null;
 
-      // Comprehensive request logging
-      console.error('[BET_PLACEMENT_FULL_REQUEST_DETAILS]', {
-        body: JSON.stringify(req.body),
-        headers: JSON.stringify(req.headers),
-        method: req.method,
-        contentType: req.get('Content-Type'),
-        userId: req.user ? req.user.user_id : 'NO USER ID',
+      // Log received request details
+      logger.info('[BET_PLACEMENT_REQUEST]', {
+        amount,
         decodedUser: JSON.stringify(req.user)
       });
 
-      const userId = req.user ? req.user.user_id : null;
-
       // Comprehensive input validation with detailed logging
       if (amount === undefined || amount === null) {
-        console.error('[BET_PLACEMENT_ERROR] Missing bet amount', {
+        logger.error('[BET_PLACEMENT_ERROR] Missing bet amount', {
           receivedBody: JSON.stringify(req.body),
           expectedFields: ['amount']
         });
@@ -68,7 +64,7 @@ router.post('/place',
       // Convert amount to number and validate
       const betAmount = Number(amount);
       if (isNaN(betAmount) || betAmount <= 0) {
-        console.error('[BET_PLACEMENT_ERROR] Invalid bet amount', { 
+        logger.error('[BET_PLACEMENT_ERROR] Invalid bet amount', { 
           amount, 
           parsedAmount: betAmount,
           receivedBody: JSON.stringify(req.body)
@@ -83,21 +79,21 @@ router.post('/place',
       // Place bet
       const result = await betService.placeBet({ 
         amount: betAmount, 
-        user: req.user ? req.user.user_id : null
+        userId
       });
 
       // Log successful bet placement
-      console.log('[BET_PLACEMENT_SUCCESS]', {
+      logger.info('[BET_PLACEMENT_SUCCESS]', {
         betId: result.betId,
         amount: betAmount,
-        user: req.user ? req.user.user_id : null,
-        gameId: result.gameId
+        userId,
+        gameId: result.gameSessionId
       });
 
       res.status(200).json(result);
     } catch (error) {
       // Comprehensive error logging
-      console.error('[BET_PLACEMENT_CRITICAL_ERROR]', {
+      logger.error('[BET_PLACEMENT_CRITICAL_ERROR]', {
         errorMessage: error.message,
         errorStack: error.stack,
         requestBody: JSON.stringify(req.body)
@@ -117,44 +113,75 @@ router.post('/cashout',
   authMiddleware.authenticateToken, 
   async (req, res) => {
     try {
-      const { betId } = req.body;
+      const userId = req.user.user_id;  // Extract user ID from token
+      const { multiplier } = req.body;  // Get multiplier from body
 
-      // Validate bet ID
-      if (!betId) {
-        console.error('[BET_CASHOUT_ERROR] Missing bet ID', {
-          receivedBody: JSON.stringify(req.body),
-          expectedFields: ['betId']
-        });
+      logger.info('CASHOUT_REQUEST_DETAILS', {
+        userId,
+        multiplier
+      });
+
+      // Find all active bets for the user using static method
+      const activeBets = await GameRepository.findActiveBetsByUserId(userId);
+
+      if (!activeBets || activeBets.length === 0) {
         return res.status(400).json({
           success: false,
-          message: 'Bet ID is required',
-          details: 'Cashout request must include a bet ID'
+          message: 'No active bets found for cashout',
+          details: 'User does not have any active bets to cashout'
         });
       }
 
-      // Cashout bet
-      const result = await betService.cashoutBet({ betId });
+      const results = [];
 
-      // Log successful cashout
-      console.log('[BET_CASHOUT_SUCCESS]', {
-        betId,
-        winnings: result.winnings
-      });
+      for (const activeBet of activeBets) {
+        // Retrieve the current game session using static method
+        const gameSession = await GameRepository.getGameSessionById(activeBet.game_session_id);
 
-      res.status(200).json(result);
+        if (!gameSession) {
+          return res.status(400).json({
+            success: false,
+            message: 'Game session not found',
+            details: 'Unable to retrieve current game session'
+          });
+        }
+
+        // Convert multiplier to number and validate
+        const currentMultiplier = Number(multiplier);
+        if (isNaN(currentMultiplier) || currentMultiplier <= 1) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid multiplier',
+            details: 'Multiplier must be a number greater than 1'
+          });
+        }
+
+        // Use the active bet's ID
+        const result = await betService.cashoutBet({ 
+          betId: activeBet.player_bet_id,
+          userId,
+          currentMultiplier,
+          betAmount: activeBet.bet_amount
+        });
+
+        results.push(result);
+      }
+
+      res.status(200).json(results);
     } catch (error) {
       // Comprehensive error logging
-      console.error('[BET_CASHOUT_CRITICAL_ERROR]', {
+      logger.error('[BET_CASHOUT_CRITICAL_ERROR]', {
         message: error.message,
         stack: error.stack,
-        requestBody: JSON.stringify(req.body),
-        errorType: error.constructor.name
+        userId: req.user.user_id,
+        errorType: error.constructor.name,
+        errorDetails: error
       });
 
       res.status(500).json({
         success: false,
-        message: error.message || 'Failed to cashout bet',
-        details: 'An unexpected error occurred during bet cashout'
+        message: error.message || 'An unexpected error occurred during cashout',
+        details: error.details || {}
       });
     }
   }

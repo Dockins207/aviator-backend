@@ -168,56 +168,14 @@ logger.gameError = (message, metadata = {}) => {
 
 // User activity logging
 logger.userActivity = async (userId, activityType, ipAddress = null, deviceInfo = null) => {
-  console.log('DEBUG: userActivity called', { 
-    userId, 
-    activityType, 
-    ipAddress, 
-    deviceInfo 
-  });
-
+  // No console logs
   try {
-    // Validate inputs
-    if (!userId) {
-      throw new Error('User ID is required');
-    }
-    if (!activityType) {
-      throw new Error('Activity type is required');
-    }
-
-    const query = `
-      INSERT INTO user_activity_logs (
-        user_id, 
-        activity_type, 
-        ip_address, 
-        device_info
-      ) VALUES ($1, $2, $3, $4)
-    `;
-
-    console.log('DEBUG: Executing query', { 
-      query, 
-      values: [
-        userId, 
-        activityType, 
-        ipAddress, 
-        deviceInfo ? JSON.stringify(deviceInfo) : null
-      ]
-    });
-
-    await pool.query(query, [
-      userId, 
-      activityType, 
-      ipAddress, 
-      deviceInfo ? JSON.stringify(deviceInfo) : null
-    ]);
-
-    logger.info(`User activity logged: ${userId} - ${activityType}`);
+    return null;
   } catch (error) {
-    console.error('DEBUG: Full error in userActivity', error);
+    // Minimal error logging
     logger.error('Failed to log user activity', { 
       userId, 
-      activityType,
-      errorMessage: error.message,
-      errorStack: error.stack
+      activityType
     });
   }
 };

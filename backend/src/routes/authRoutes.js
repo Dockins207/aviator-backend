@@ -288,12 +288,6 @@ router.post('/register', async (req, res) => {
 // Profile route (requires authentication)
 router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
   try {
-    console.log('DEBUG: Profile route - Request details', {
-      userId: req.user?.user_id,
-      phoneNumber: req.user?.phone_number,
-      headers: req.headers
-    });
-
     // Log user activity
     await logger.userActivity(
       req.user.user_id, 
@@ -308,19 +302,11 @@ router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
     // Retrieve full user profile
     const userProfile = await authService.getUserProfile(req.user.user_id);
     
-    console.log('DEBUG: Profile route - Retrieved profile', {
-      userId: userProfile.user_id,
-      username: userProfile.username,
-      role: userProfile.role
-    });
-
     res.status(200).json({
       status: 'success',
       data: userProfile
     });
   } catch (error) {
-    console.error('DEBUG: Profile route - Full error', error);
-
     logger.error('Profile retrieval failed', { 
       userId: req.user?.user_id, 
       errorMessage: error.message,
@@ -339,17 +325,6 @@ router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
 // Get user profile balance
 router.get('/profile/balance', authMiddleware.authenticateToken, async (req, res) => {
   try {
-    console.log('DEBUG: Balance route - Full request object', {
-      headers: req.headers,
-      user: req.user,
-      token: req.token
-    });
-
-    console.log('DEBUG: Balance route - User details', {
-      userId: req.user?.user_id,
-      phoneNumber: req.user?.phone_number
-    });
-
     if (!req.user || !req.user.user_id) {
       return res.status(401).json({
         status: 'error',
@@ -360,15 +335,8 @@ router.get('/profile/balance', authMiddleware.authenticateToken, async (req, res
 
     const profileBalance = await walletService.getUserProfileBalance(req.user.user_id);
     
-    console.log('DEBUG: Balance route - Retrieved balance', {
-      userId: req.user.user_id,
-      balance: profileBalance
-    });
-
     res.status(200).json(profileBalance);
   } catch (error) {
-    console.error('DEBUG: Balance route - Full error', error);
-
     logger.error('Profile balance retrieval failed', { 
       userId: req.user?.user_id, 
       errorMessage: error.message,
@@ -389,12 +357,6 @@ router.post('/profile/deposit', authMiddleware.authenticateToken, async (req, re
   try {
     const { amount, description } = req.body;
 
-    console.log('DEBUG: Deposit route - Request details', {
-      userId: req.user.user_id,
-      amount,
-      description
-    });
-
     // Validate input
     if (!amount || typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({
@@ -410,15 +372,8 @@ router.post('/profile/deposit', authMiddleware.authenticateToken, async (req, re
       description || 'Manual Deposit'
     );
     
-    console.log('DEBUG: Deposit route - Updated wallet', {
-      userId: req.user.user_id,
-      newBalance: updatedWallet.balance
-    });
-
     res.status(200).json(updatedWallet);
   } catch (error) {
-    console.error('DEBUG: Deposit route - Full error', error);
-
     logger.error('Wallet deposit failed', { 
       userId: req.user.user_id, 
       errorMessage: error.message,
@@ -439,12 +394,6 @@ router.post('/profile/withdraw', authMiddleware.authenticateToken, async (req, r
   try {
     const { amount, description } = req.body;
 
-    console.log('DEBUG: Withdrawal route - Request details', {
-      userId: req.user.user_id,
-      amount,
-      description
-    });
-
     // Validate input
     if (!amount || typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({
@@ -460,15 +409,8 @@ router.post('/profile/withdraw', authMiddleware.authenticateToken, async (req, r
       description || 'Manual Withdrawal'
     );
     
-    console.log('DEBUG: Withdrawal route - Updated wallet', {
-      userId: req.user.user_id,
-      newBalance: updatedWallet.balance
-    });
-
     res.status(200).json(updatedWallet);
   } catch (error) {
-    console.error('DEBUG: Withdrawal route - Full error', error);
-
     logger.error('Wallet withdrawal failed', { 
       userId: req.user.user_id, 
       errorMessage: error.message,
@@ -489,12 +431,6 @@ router.get('/profile/transactions', authMiddleware.authenticateToken, async (req
   try {
     const { limit, offset } = req.query;
 
-    console.log('DEBUG: Transaction history route - Request details', {
-      userId: req.user.user_id,
-      limit: limit ? parseInt(limit) : undefined,
-      offset: offset ? parseInt(offset) : undefined
-    });
-
     // Validate and convert query parameters
     const parsedLimit = limit ? parseInt(limit) : 50;
     const parsedOffset = offset ? parseInt(offset) : 0;
@@ -514,15 +450,8 @@ router.get('/profile/transactions', authMiddleware.authenticateToken, async (req
       parsedOffset
     );
     
-    console.log('DEBUG: Transaction history route - Retrieved transactions', {
-      userId: req.user.user_id,
-      transactionCount: transactionHistory.transactions.length
-    });
-
     res.status(200).json(transactionHistory);
   } catch (error) {
-    console.error('DEBUG: Transaction history route - Full error', error);
-
     logger.error('Wallet transaction history retrieval failed', { 
       userId: req.user.user_id, 
       errorMessage: error.message,
@@ -583,12 +512,6 @@ router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
 // Logout route with token management
 router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {
   try {
-    console.log('DEBUG: Logout route - Request details', {
-      userId: req.user?.user_id,
-      phoneNumber: req.user?.phone_number,
-      headers: req.headers
-    });
-
     // Log user activity
     await logger.userActivity(
       req.user.user_id, 
@@ -603,17 +526,11 @@ router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {
     // Blacklist the current token
     authMiddleware.blacklistToken(req.token);
     
-    console.log('DEBUG: Logout route - Token blacklisted', {
-      userId: req.user.user_id
-    });
-
     res.status(200).json({
       status: 'success',
       message: 'Logged out successfully'
     });
   } catch (error) {
-    console.error('DEBUG: Logout route - Full error', error);
-
     logger.error('Logout failed', { 
       userId: req.user?.user_id, 
       errorMessage: error.message,

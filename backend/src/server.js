@@ -7,12 +7,15 @@ import os from 'os';
 import logger from './config/logger.js';
 import redisConnection from './config/redisConfig.js';
 import { pool, connectWithRetry } from './config/database.js';
+import { WalletRepository } from './repositories/walletRepository.js';
 import gameService from './services/gameService.js';
 import errorMiddleware from './middleware/errorMiddleware.js';
 import authRoutes from './routes/authRoutes.js';
 import gameRoutes from './routes/gameRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
 import betRoutes from './routes/betRoutes.js';
+import schedule from 'node-schedule';
+import { authService } from './services/authService.js';
 
 // Load environment variables
 dotenv.config();
@@ -45,22 +48,26 @@ app.use(errorMiddleware);
 
 // Network interface logging
 function getNetworkInterfaces() {
-  const interfaces = os.networkInterfaces();
-  const networkInfo = [];
+  try {
+    const interfaces = os.networkInterfaces();
+    const networkInfo = [];
 
-  Object.keys(interfaces).forEach((interfaceName) => {
-    interfaces[interfaceName].forEach((details) => {
-      if (details.family === 'IPv4' && !details.internal) {
-        networkInfo.push({
-          name: interfaceName,
-          address: details.address,
-          netmask: details.netmask
-        });
-      }
+    Object.keys(interfaces).forEach((interfaceName) => {
+      interfaces[interfaceName].forEach((details) => {
+        if (details.family === 'IPv4' && !details.internal) {
+          networkInfo.push({
+            name: interfaceName,
+            address: details.address,
+            netmask: details.netmask
+          });
+        }
+      });
     });
-  });
 
-  return networkInfo;
+    return networkInfo;
+  } catch (error) {
+    logger.error('Error getting network interfaces', { error: error.message });
+  }
 }
 
 // Main server startup function
@@ -81,8 +88,9 @@ async function startServer() {
     Promise.all([
       import('./sockets/gameSocket.js'),
       import('./sockets/chatSocket.js'),
-      import('./sockets/betSocket.js')
-    ]).then(async ([{ default: GameSocket }, { default: chatSocket }, { default: betSocket }]) => {
+      import('./sockets/betSocket.js'),
+      import('./sockets/walletSocket.js')
+    ]).then(async ([{ default: GameSocket }, { default: chatSocket }, { default: betSocket }, { default: WalletSocket }]) => {
       // Initialize Socket.IO
       const io = new SocketIOServer(httpServer, {
         cors: corsOptions
@@ -92,47 +100,37 @@ async function startServer() {
       const gameSocket = new GameSocket(io);
       chatSocket(io);
       betSocket(io);
+      
+      // Set up wallet socket and repository
+      WalletRepository.setWalletSocket(io);
 
       // Start server
       httpServer.listen(PORT, '0.0.0.0', async () => {
-        console.log('=== SERVER STARTUP DETAILS ===');
-        console.log(`[SERVER] Running on ALL interfaces`);
+        // Removed console.log for server startup details
         
         // Log all registered routes
-        console.log('[SERVER] Registered Routes:');
         app._router.stack.forEach((r) => {
           if (r.route && r.route.path) {
-            console.log(`  - ${Object.keys(r.route.methods).join(', ').toUpperCase()}: ${r.route.path}`);
+            // Removed console.log for registered routes
           }
         });
 
         // Explicitly connect to Redis before starting game cycle
         try {
           await redisConnection.connect();
-          console.log('[SERVER] Redis connection established');
+          // Removed console.log for Redis connection
         } catch (redisError) {
           console.error('[SERVER] Failed to connect to Redis', redisError);
           // Optionally, you might want to exit the process or handle this differently
         }
 
-        console.log(`[SERVER] Port: ${PORT}`);
-        console.log(`[SERVER] Environment: ${NODE_ENV}`);
-        console.log(`[SERVER] Frontend URL: ${FRONTEND_URL}`);
+        // Removed console.log for port, environment, and frontend URL
         
         // Log network interfaces
-        console.log('[SERVER] Network Interfaces:');
         const networkInterfaces = getNetworkInterfaces();
-        networkInterfaces.forEach((iface) => {
-          console.log(`  - ${iface.name}: ${iface.address}`);
-        });
+        // Removed console.log for network interfaces
 
-        console.log('[SERVER] Accessible via:');
-        console.log(`  - http://localhost:${PORT}`);
-        console.log(`  - http://127.0.0.1:${PORT}`);
-        console.log(`  - http://0.0.0.0:${PORT}`);
-        networkInterfaces.forEach((iface) => {
-          console.log(`  - http://${iface.address}:${PORT}`);
-        });
+        // Removed console.log for accessible URLs
 
         // Start game cycle
         gameSocket.startGameCycle();
