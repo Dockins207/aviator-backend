@@ -1,134 +1,221 @@
 import winston from 'winston';
+import 'winston-daily-rotate-file';
 import path from 'path';
-import fs from 'fs';
 import { pool } from './database.js';
 
-// Custom log levels with game-specific logging
-const logLevels = {
-  error: 0,
-  warn: 1,
-  info: 2,
-  debug: 3
+// Log tracking to prevent duplicate logs
+const _logTracker = {
+  socketAuth: new Set(),
+  betPlacement: new Set(),
+  gameEvents: new Map(),
+  connectionEvents: new Set(),
+  redisMetrics: {
+    lastLoggedTotalBets: 0,
+    lastLoggedTimestamp: 0
+  }
 };
 
-// Custom colors for log levels
-const logColors = {
-  error: 'red',
-  warn: 'yellow',
-  info: 'blue',
-  debug: 'gray'
-};
+// Custom log filtering and deduplication logic
+const logFilter = winston.format((info, opts) => {
+  const { message, level, service } = info;
 
-// Ensure logs directory exists
-const logsDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir);
-}
+  // Remove gameMultiplier from log metadata
+  if (info.gameMultiplier !== undefined) {
+    delete info.gameMultiplier;
+  }
 
-// Create a custom logger with multiple transports
+  // Simplify headers by removing full authorization token
+  if (info.headers) {
+    try {
+      const parsedHeaders = typeof info.headers === 'string' 
+        ? JSON.parse(info.headers) 
+        : info.headers;
+
+      // If authorization header exists, replace with a truncated version
+      if (parsedHeaders.authorization) {
+        const tokenParts = parsedHeaders.authorization.split('.');
+        if (tokenParts.length === 3) {
+          // Keep first 10 and last 10 characters of the token
+          parsedHeaders.authorization = `Bearer ${tokenParts[0].slice(0, 10)}...${tokenParts[2].slice(-10)}`;
+        }
+      }
+
+      // Reduce other headers to minimal set
+      const minimalHeaders = {
+        host: parsedHeaders.host,
+        'content-type': parsedHeaders['content-type'],
+        authorization: parsedHeaders.authorization
+      };
+
+      info.headers = JSON.stringify(minimalHeaders);
+    } catch (error) {
+      // If parsing fails, just remove the headers
+      delete info.headers;
+    }
+  }
+
+  // Simplify log messages for bet and cashout-related events
+  const simplifiableLogMessages = [
+    '[BET_REQUEST]', 
+    '[BET_REQUEST_DETAILS]', 
+    '[BET_PLACEMENT_REQUEST]',
+    '[BET_PLACEMENT_SUCCESS]',
+    'BET_ADDED_TO_BETTING_STATE',
+    'BET_PLACED',
+    '[CASHOUT_REQUEST]',
+    '[CASHOUT_REQUEST_DETAILS]',
+    'CASHOUT_REQUEST_DETAILS'
+  ];
+
+  if (simplifiableLogMessages.includes(message)) {
+    // Reduce log verbosity to bare minimum
+    const simplifiedInfo = {
+      service: info.service,
+      // Handle both bet and cashout scenarios
+      amount: info.amount || (info.body ? JSON.parse(info.body || '{}').amount : undefined),
+      multiplier: info.multiplier || (info.body ? JSON.parse(info.body || '{}').multiplier : undefined),
+      userId: info.userId || (info.decodedUser ? JSON.parse(info.decodedUser).user_id : undefined)
+    };
+
+    // Only keep non-undefined values
+    Object.keys(simplifiedInfo).forEach(key => 
+      simplifiedInfo[key] === undefined && delete simplifiedInfo[key]
+    );
+
+    // For specific log types, further reduce information
+    switch(message) {
+      case 'BET_ADDED_TO_BETTING_STATE':
+        simplifiedInfo.betId = info.betId;
+        break;
+      case 'BET_PLACED':
+        simplifiedInfo.gameId = info.gameId;
+        break;
+      case '[BET_PLACEMENT_SUCCESS]':
+        simplifiedInfo.betId = info.betId;
+        break;
+      case 'CASHOUT_REQUEST_DETAILS':
+        simplifiedInfo.multiplier = info.multiplier;
+        break;
+    }
+
+    return { ...info, ...simplifiedInfo };
+  }
+
+  // Prevent duplicate socket authentication logs
+  if (message === 'SOCKET_AUTHENTICATION') {
+    const authKey = `${info.userId}-${info.socketId}`;
+    if (_logTracker.socketAuth.has(authKey)) {
+      return false;
+    }
+    _logTracker.socketAuth.add(authKey);
+  }
+
+  // Prevent duplicate bet placement logs
+  if (message === 'BET_PLACED') {
+    const betKey = `${info.userId}-${info.betAmount}-${info.gameId}`;
+    if (_logTracker.betPlacement.has(betKey)) {
+      return false;
+    }
+    _logTracker.betPlacement.add(betKey);
+  }
+
+  // Reduce frequency of repetitive game and system logs
+  const repetitiveEvents = [
+    'TOTAL_BET_AMOUNT_BREAKDOWN', 
+    'BETS_COLLECTED_IN_BETTING_STATE', 
+    'ACTIVE_BETS_PUSHED_TO_REDIS',
+    'BETS_READY_FOR_CASHOUT'
+  ];
+
+  if (repetitiveEvents.includes(message)) {
+    const now = Date.now();
+    const lastLogTime = _logTracker.gameEvents.get(message) || 0;
+    
+    // Only log these events every 30 seconds
+    if (now - lastLogTime < 30000) {
+      return false;
+    }
+    
+    // Update last log time
+    _logTracker.gameEvents.set(message, now);
+  }
+
+  // Optimize Redis metrics logging
+  if (message === 'REDIS_BET_METRICS') {
+    const { totalBetsReceived } = info;
+    const now = Date.now();
+    
+    // Only log if total bets changed or 2 minutes have passed
+    const shouldLog = 
+      totalBetsReceived !== _logTracker.redisMetrics.lastLoggedTotalBets ||
+      now - _logTracker.redisMetrics.lastLoggedTimestamp > 120000;
+
+    if (shouldLog) {
+      _logTracker.redisMetrics.lastLoggedTotalBets = totalBetsReceived;
+      _logTracker.redisMetrics.lastLoggedTimestamp = now;
+      return info;
+    }
+    return false;
+  }
+
+  // Prevent duplicate connection logs
+  const connectionEvents = ['Database connection established', 'Redis connection established'];
+  if (connectionEvents.includes(message)) {
+    const connectionKey = `${message}-${info.host || info.url}`;
+    if (_logTracker.connectionEvents.has(connectionKey)) {
+      return false;
+    }
+    _logTracker.connectionEvents.add(connectionKey);
+  }
+
+  return info;
+});
+
+// Create console and file transports with advanced formatting
+const consoleFormat = winston.format.combine(
+  winston.format.colorize(),
+  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+  winston.format.printf(({ timestamp, level, message, ...metadata }) => {
+    let msg = `${timestamp} ${level}: ${message} `;
+    const metadataStr = Object.keys(metadata).length 
+      ? JSON.stringify(metadata, null, 2) 
+      : '';
+    return msg + metadataStr;
+  })
+);
+
+const fileTransport = new winston.transports.DailyRotateFile({
+  filename: path.join(process.cwd(), 'logs', 'aviator-%DATE%.log'),
+  datePattern: 'YYYY-MM-DD',
+  zippedArchive: true,
+  maxSize: '20m',
+  maxFiles: '14d'
+});
+
 const logger = winston.createLogger({
-  levels: logLevels,
   level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(
-    winston.format.timestamp({
-      format: 'YYYY-MM-DD HH:mm:ss.SSS'
-    }),
-    winston.format.errors({ stack: true }),
-    winston.format.splat(),
+    logFilter(),
     winston.format.json()
   ),
   defaultMeta: { service: 'aviator-backend' },
   transports: [
-    // Console transport with custom formatting
     new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize({ 
-          all: true,
-          colors: logColors 
-        }),
-        winston.format.printf(({ timestamp, level, message, ...metadata }) => {
-          let msg = `[${timestamp}] ${level}: ${message} `;
-          
-          // Add metadata if exists
-          const metadataStr = Object.keys(metadata).length 
-            ? JSON.stringify(metadata) 
-            : '';
-          
-          return msg + metadataStr;
-        })
-      ),
-      // Filter out unwanted logs
-      filter: (logEntry) => logger.filterLogs(logEntry)
+      format: consoleFormat
     }),
-    
-    // File transport for all logs
+    fileTransport
+  ],
+  exceptionHandlers: [
     new winston.transports.File({ 
-      filename: path.join(logsDir, 'combined.log'),
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-      level: 'debug',
-      // Filter out unwanted logs
-      filter: (logEntry) => logger.filterLogs(logEntry)
-    }),
-    
-    // Separate error logs
+      filename: path.join(process.cwd(), 'logs', 'exceptions.log') 
+    })
+  ],
+  rejectionHandlers: [
     new winston.transports.File({ 
-      filename: path.join(logsDir, 'error.log'), 
-      level: 'error',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5
+      filename: path.join(process.cwd(), 'logs', 'rejections.log') 
     })
   ]
 });
-
-// Filtering method to remove unwanted logs
-logger.filterLogs = (logEntry) => {
-  // Completely block any game-related logs
-  const gameKeywords = [
-    'Game', 'game', 'GAME_SOCKET', 'GameSocket', 
-    'gameState', 'GameState', 'multiplier', 
-    'crashPoint', 'betting', 'flying', 'cycle',
-    'Incremented game metric'
-  ];
-
-  // Check if the log contains any game-related keywords
-  const hasGameKeywords = gameKeywords.some(keyword => 
-    (logEntry.message && logEntry.message.includes(keyword)) ||
-    (logEntry.metadata && JSON.stringify(logEntry.metadata).includes(keyword))
-  );
-
-  // If game keywords are found, suppress the log
-  if (hasGameKeywords) {
-    return false;
-  }
-
-  // Default allowed contexts and messages
-  const allowedContexts = [
-    '[DATABASE]', 
-    '[REDIS]',
-    '[SERVER]'
-  ];
-  const allowedMessages = [
-    'Database connection established successfully',
-    'Closing database connection pool',
-    'Redis connection established',
-    'Running on ALL interfaces',
-    'Port:',
-    'Environment:',
-    'Frontend URL:',
-    'Network Interfaces:',
-    'Accessible via:'
-  ];
-
-  // Check if the log should be allowed
-  return allowedContexts.some(context => 
-    (logEntry.message && logEntry.message.includes(context)) || 
-    (logEntry.metadata && JSON.stringify(logEntry.metadata).includes(context))
-  ) || allowedMessages.some(msg => 
-    (logEntry.message && logEntry.message.includes(msg)) || 
-    (logEntry.metadata && JSON.stringify(logEntry.metadata).includes(msg))
-  );
-};
 
 // Extend logger with additional methods
 logger.serverInfo = (message, metadata = {}) => {
@@ -179,5 +266,23 @@ logger.userActivity = async (userId, activityType, ipAddress = null, deviceInfo 
     });
   }
 };
+
+// Extend logger with a method to log unique events
+logger.uniqueEvent = (eventType, metadata = {}) => {
+  // Track and log only unique or significant events
+  const uniqueEventTypes = [
+    'BET_REQUEST', 
+    'BET_PLACEMENT_REQUEST', 
+    'BET_PLACED', 
+    'BET_PLACEMENT_SUCCESS',
+    'SOCKET_AUTHENTICATION',
+    'GAME_SESSION_START',
+    'GAME_SESSION_END'
+  ];
+
+  if (uniqueEventTypes.includes(eventType)) {
+    logger.info(eventType, metadata);
+  }
+}
 
 export default logger;

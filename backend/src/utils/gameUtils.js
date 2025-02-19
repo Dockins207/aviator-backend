@@ -78,4 +78,27 @@ class GameUtils {
   }
 }
 
+/**
+ * Format number with commas and two decimal places
+ * @param {number} number - Number to format
+ * @param {string} [currency=''] - Optional currency symbol
+ * @returns {string} Formatted number with commas
+ */
+function formatCurrency(number, currency = '') {
+  if (number == null) return '';
+  
+  // Ensure number is converted to a number and fixed to 2 decimal places
+  const formattedNumber = Number(number).toFixed(2);
+  
+  // Split into integer and decimal parts
+  const [integerPart, decimalPart] = formattedNumber.split('.');
+  
+  // Add commas to integer part
+  const formattedInteger = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  
+  // Combine parts with optional currency
+  return `${currency}${formattedInteger}.${decimalPart}`;
+}
+
 export default new GameUtils();
+export { formatCurrency };

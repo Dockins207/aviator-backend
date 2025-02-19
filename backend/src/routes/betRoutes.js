@@ -1,8 +1,11 @@
 import express from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import betService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import GameRepository from '../repositories/gameRepository.js';
+import redisRepository from '../redis-services/redisRepository.js';
+import statsService from '../services/statsService.js';
 
 const router = express.Router();
 
@@ -39,13 +42,19 @@ router.post('/place',
   authMiddleware.authenticateToken, 
   async (req, res) => {
     try {
-      const { amount } = req.body;
-      const userId = req.user ? req.user.user_id : null;
+      // Explicitly add decoded user to request object if not already present
+      if (!req.user && req.auth) {
+        req.user = req.auth;
+      }
 
-      // Log received request details
+      const { amount } = req.body;
+      const userId = req.user ? req.user.user_id || req.user.userId : null;
+
+      // Log received request details with explicit user object check
       logger.info('[BET_PLACEMENT_REQUEST]', {
         amount,
-        decodedUser: JSON.stringify(req.user)
+        decodedUser: JSON.stringify(req.user || {}),
+        userId: userId
       });
 
       // Comprehensive input validation with detailed logging
@@ -80,7 +89,10 @@ router.post('/place',
       const result = await betService.placeBet({ 
         amount: betAmount, 
         userId
-      });
+      }, req);  // Pass entire request object
+
+      // Track total bets
+      statsService.incrementTotalBetsByAmount(betAmount);
 
       // Log successful bet placement
       logger.info('[BET_PLACEMENT_SUCCESS]', {
@@ -96,7 +108,8 @@ router.post('/place',
       logger.error('[BET_PLACEMENT_CRITICAL_ERROR]', {
         errorMessage: error.message,
         errorStack: error.stack,
-        requestBody: JSON.stringify(req.body)
+        requestBody: JSON.stringify(req.body),
+        userObject: JSON.stringify(req.user || {})
       });
 
       res.status(500).json({
@@ -112,75 +125,50 @@ router.post('/place',
 router.post('/cashout', 
   authMiddleware.authenticateToken, 
   async (req, res) => {
-    try {
-      const userId = req.user.user_id;  // Extract user ID from token
-      const { multiplier } = req.body;  // Get multiplier from body
+    const userId = req.user.user_id;
+    const rawMultiplier = req.body.multiplier;
+    const cashoutMultiplier = parseFloat(rawMultiplier);
 
-      logger.info('CASHOUT_REQUEST_DETAILS', {
-        userId,
-        multiplier
-      });
+    // Log detailed multiplier information
+    logger.info('CASHOUT_MULTIPLIER_INCOMING', {
+      userId,
+      rawMultiplier,
+      parsedMultiplier: cashoutMultiplier,
+      rawMultiplierType: typeof rawMultiplier,
+      parsedMultiplierType: typeof cashoutMultiplier
+    });
 
-      // Find all active bets for the user using static method
-      const activeBets = await GameRepository.findActiveBetsByUserId(userId);
-
-      if (!activeBets || activeBets.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'No active bets found for cashout',
-          details: 'User does not have any active bets to cashout'
-        });
-      }
-
-      const results = [];
-
-      for (const activeBet of activeBets) {
-        // Retrieve the current game session using static method
-        const gameSession = await GameRepository.getGameSessionById(activeBet.game_session_id);
-
-        if (!gameSession) {
-          return res.status(400).json({
-            success: false,
-            message: 'Game session not found',
-            details: 'Unable to retrieve current game session'
-          });
-        }
-
-        // Convert multiplier to number and validate
-        const currentMultiplier = Number(multiplier);
-        if (isNaN(currentMultiplier) || currentMultiplier <= 1) {
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid multiplier',
-            details: 'Multiplier must be a number greater than 1'
-          });
-        }
-
-        // Use the active bet's ID
-        const result = await betService.cashoutBet({ 
-          betId: activeBet.player_bet_id,
-          userId,
-          currentMultiplier,
-          betAmount: activeBet.bet_amount
-        });
-
-        results.push(result);
-      }
-
-      res.status(200).json(results);
-    } catch (error) {
-      // Comprehensive error logging
-      logger.error('[BET_CASHOUT_CRITICAL_ERROR]', {
-        message: error.message,
-        stack: error.stack,
-        userId: req.user.user_id,
-        errorType: error.constructor.name,
-        errorDetails: error
-      });
-
-      res.status(500).json({
+    // Validate multiplier
+    if (isNaN(cashoutMultiplier) || cashoutMultiplier <= 0) {
+      return res.status(400).json({
         success: false,
-        message: error.message || 'An unexpected error occurred during cashout',
+        message: 'Invalid cashout multiplier'
+      });
+    }
+
+    try {
+      // Perform cashout
+      const cashoutResult = await betService.cashOut(req, cashoutMultiplier);
+
+      // Return successful cashout response
+      res.status(200).json({
+        success: true,
+        ...cashoutResult
+      });
+
+    } catch (error) {
+      // Log and handle errors
+      logger.error('CASHOUT_PROCESS_CRITICAL_ERROR', {
+        userId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+
+      // Determine appropriate error response
+      const statusCode = error.name === 'ValidationError' ? 400 : 500;
+      res.status(statusCode).json({
+        success: false,
+        message: error.message,
         details: error.details || {}
       });
     }
@@ -193,11 +181,6 @@ router.get('/current-bets',
   async (req, res) => {
     try {
       const currentBets = await betService.getCurrentBets();
-      
-      logger.info('[CURRENT_BETS_RETRIEVED]', {
-        betCount: currentBets.length,
-        timestamp: new Date().toISOString()
-      });
 
       res.status(200).json({
         success: true,
@@ -216,5 +199,28 @@ router.get('/current-bets',
     }
   }
 );
+
+export function initializeStatsService(io) {
+  // If io is not provided, do nothing
+  if (!io) return;
+
+  // Set up stats service
+  statsService.setSocketIO(io);
+
+  // Track online users and total bets
+  io.on('connection', (socket) => {
+    // Add user to online users when they connect
+    if (socket.user && socket.user.id) {
+      statsService.addOnlineUser(socket.user.id);
+    }
+
+    // Remove user from online users when they disconnect
+    socket.on('disconnect', () => {
+      if (socket.user && socket.user.id) {
+        statsService.removeOnlineUser(socket.user.id);
+      }
+    });
+  });
+}
 
 export default router;

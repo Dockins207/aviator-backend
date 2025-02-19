@@ -3,11 +3,12 @@ import logger from '../config/logger.js';
 
 class RedisConnection {
   constructor() {
-    this.client = createClient({
-      url: process.env.REDIS_URL || 'redis://localhost:6379',
-      // Optional: Add authentication if needed
-      // password: process.env.REDIS_PASSWORD
-    });
+    this.client = null;
+    this.pubClient = null;
+    this.subClient = null;
+
+    // Prevent multiple connection logs
+    this._hasLoggedConnection = false;
 
     // Metrics tracking
     this.metrics = {
@@ -16,22 +17,94 @@ class RedisConnection {
       gameSessionBetCounts: {},
       lastLoggedBetCount: 0
     };
+  }
 
-    this.client.on('error', (err) => {
-      logger.error('Redis Client Error', { 
-        errorMessage: err.message,
-        errorStack: err.stack 
+  async connect() {
+    try {
+      // Main client
+      this.client = createClient({
+        url: process.env.REDIS_URL || 'redis://localhost:6379'
       });
-    });
 
-    this.client.on('connect', () => {
-      logger.info('Redis connection established');
-      this.resetMetrics();
-    });
+      // Pub client
+      this.pubClient = this.client.duplicate();
 
-    // Track connection state
-    this._isConnecting = false;
-    this._connectionPromise = null;
+      // Sub client
+      this.subClient = this.client.duplicate();
+
+      // Connect all clients
+      await Promise.all([
+        this.client.connect(),
+        this.pubClient.connect(),
+        this.subClient.connect()
+      ]);
+
+      // Error handling for each client
+      [this.client, this.pubClient, this.subClient].forEach(client => {
+        client.on('error', (err) => {
+          logger.error('REDIS_CONNECTION_ERROR', {
+            errorMessage: err.message,
+            errorStack: err.stack
+          });
+        });
+      });
+
+      // Log Redis connection only once
+      if (!this._hasLoggedConnection) {
+        logger.info('REDIS_CONNECTION_ESTABLISHED', {
+          url: process.env.REDIS_URL || 'redis://localhost:6379'
+        });
+        this._hasLoggedConnection = true;
+        this.resetMetrics();
+      }
+
+      return true;
+    } catch (error) {
+      logger.error('REDIS_CONNECTION_FAILED', {
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      return false;
+    }
+  }
+
+  getClient() {
+    if (!this.client) {
+      throw new Error('Redis client not initialized');
+    }
+    return this.client;
+  }
+
+  getPubClient() {
+    if (!this.pubClient) {
+      throw new Error('Redis pub client not initialized');
+    }
+    return this.pubClient;
+  }
+
+  getSubClient() {
+    if (!this.subClient) {
+      throw new Error('Redis sub client not initialized');
+    }
+    return this.subClient;
+  }
+
+  async disconnect() {
+    try {
+      // Log final metrics before disconnecting
+      this.logMetrics();
+      await Promise.all([
+        this.client?.quit(),
+        this.pubClient?.quit(),
+        this.subClient?.quit()
+      ]);
+
+      logger.info('REDIS_DISCONNECTED');
+    } catch (error) {
+      logger.error('REDIS_DISCONNECT_ERROR', {
+        errorMessage: error.message
+      });
+    }
   }
 
   // Reset metrics periodically or on demand
@@ -89,52 +162,6 @@ class RedisConnection {
       this.logMetrics();
     }
   }
-
-  async connect() {
-    // Prevent multiple simultaneous connection attempts
-    if (this._isConnecting) {
-      return this._connectionPromise;
-    }
-
-    this._isConnecting = true;
-    this._connectionPromise = new Promise(async (resolve, reject) => {
-      try {
-        // If not already open, connect
-        if (!this.client.isOpen) {
-          await this.client.connect();
-        }
-        resolve(this.client);
-      } catch (error) {
-        logger.error('Failed to establish Redis connection', {
-          errorMessage: error.message,
-          errorStack: error.stack
-        });
-        reject(error);
-      } finally {
-        this._isConnecting = false;
-      }
-    });
-
-    return this._connectionPromise;
-  }
-
-  async disconnect() {
-    // Log final metrics before disconnecting
-    this.logMetrics();
-    if (this.client.isOpen) {
-      await this.client.quit();
-    }
-  }
-
-  // Add method to get the client
-  getClient() {
-    if (!this.client.isOpen) {
-      logger.warn('Attempting to get Redis client before connection');
-    }
-    return this.client;
-  }
 }
 
-const redisConnection = new RedisConnection();
-
-export default redisConnection;
+export default new RedisConnection();

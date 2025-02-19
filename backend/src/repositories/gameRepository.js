@@ -608,51 +608,21 @@ class GameRepository {
    * @returns {Promise<Array>} Active bets or empty array if not found
    */
   static async findActiveBetsByUserId(userId) {
-    if (!userId) {
-      logger.warn('FIND_ACTIVE_BETS_NO_USER_ID', {
-        message: 'Attempted to find active bets without a user ID'
-      });
-      return [];
-    }
-
     try {
       const query = `
-        SELECT 
-          pb.player_bet_id,
-          pb.user_id,
-          pb.game_session_id,
-          pb.bet_amount,
-          pb.status AS bet_status,
-          gs.game_type,
-          gs.status AS game_status,
-          pb.created_at
-        FROM 
-          player_bets pb
-        JOIN 
-          game_sessions gs ON pb.game_session_id = gs.game_session_id
+        SELECT pb.*
+        FROM player_bets pb
+        JOIN game_sessions gs ON pb.game_session_id = gs.game_session_id
         WHERE 
           pb.user_id = $1 
-          AND (
-            (pb.status = 'active' AND gs.status = 'in_progress')
-            OR 
-            (pb.status = 'active' AND gs.status = 'completed')
-          )
-        ORDER BY pb.created_at DESC
+          AND pb.status = 'active' 
+          AND gs.status = 'in_progress'
       `;
-
       const result = await global.pool.query(query, [userId]);
 
-      logger.info('ACTIVE_BETS_SEARCH_DETAILS', {
+      logger.info('ACTIVE_BETS_RETRIEVED', {
         userId,
-        resultCount: result.rows.length,
-        searchQuery: query,
-        searchParams: [userId],
-        foundBets: result.rows.map(bet => ({
-          betId: bet.player_bet_id,
-          status: bet.bet_status,
-          amount: bet.bet_amount,
-          gameType: bet.game_type
-        }))
+        activeBetCount: result.rows.length
       });
 
       return result.rows;

@@ -1,13 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
+import jwt from 'jsonwebtoken'; // Import jwt
 import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
 import phoneValidator from '../utils/phoneValidator.js'; 
 import { WalletRepository } from '../repositories/walletRepository.js';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_here';
-const JWT_EXPIRATION = '7d';
+import redisRepository from '../redis-services/redisRepository.js';
 
 const balanceService = {
   // Sync balance from users table to wallets table
@@ -348,14 +347,29 @@ export const authService = {
 
       // Insert new user with additional error handling
       const insertQuery = `
-        INSERT INTO users (user_id, username, phone_number, password_hash, salt) 
-        VALUES ($1, $2, $3, $4, $5) 
-        RETURNING user_id, username, phone_number, role, created_at
+        INSERT INTO users (
+          user_id, 
+          username, 
+          phone_number, 
+          password_hash, 
+          salt,
+          is_active,  
+          created_at,
+          updated_at
+        ) 
+        VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+        RETURNING user_id, username, phone_number, role, is_active, created_at
       `;
       
       let result;
       try {
-        result = await pool.query(insertQuery, [userId, username, validationResult.normalizedNumber, passwordHash, saltRounds.toString()]);
+        result = await pool.query(insertQuery, [
+          userId, 
+          username, 
+          validationResult.normalizedNumber, 
+          passwordHash, 
+          saltRounds.toString()
+        ]);
       } catch (insertError) {
         logger.error('REGISTER_DATABASE_INSERT_ERROR', {
           errorCode: 'DATABASE_INSERT_FAILED',
@@ -376,11 +390,16 @@ export const authService = {
       // Create wallet for the new user using WalletRepository
       await WalletRepository.createWallet(userId);
 
-      logger.info('User registered successfully', {
-        username: username
+      logger.info('User registered and activated successfully', {
+        username: username,
+        userId: userId,
+        isActive: true
       });
 
-      return result.rows[0];
+      return {
+        ...result.rows[0],
+        is_active: true  
+      };
     } catch (error) {
       logger.error('REGISTER_FATAL_ERROR', {
         errorCode: 'REGISTRATION_FAILED',
@@ -471,40 +490,102 @@ export const authService = {
         ? 'wallet_balance' 
         : 'user_balance';
 
-      // Generate JWT token with verified balance and extensive metadata
+      // Generate JWT token instead of custom token
       const token = jwt.sign(
-        { 
-          user_id: user.user_id, 
-          phone_number: user.phone_number, 
-          username: user.username, 
+        {
+          user_id: user.user_id,
+          username: user.username,
           role: user.role,
-          balance: currentBalance,  // Raw balance
-          formattedBalance: `KSH ${currentBalance.toFixed(2)}`,  // Formatted balance
-          balance_metadata: {
-            source: balanceSource,
-            timestamp: new Date().toISOString(),
-            trace_id: traceId
-          }
-        }, 
-        JWT_SECRET, 
-        { expiresIn: JWT_EXPIRATION }
+          phone_number: user.phone_number
+        },
+        process.env.JWT_SECRET || 'your_jwt_secret_here', 
+        { expiresIn: '7d' }
       );
+
+      // Optional: Still store token details in Redis for additional tracking
+      const redisClient = await redisRepository.getClient();
+      const userTokenKey = `user_token:${user.user_id}`;
+      await redisClient.set(
+        userTokenKey, 
+        JSON.stringify({
+          token,
+          lastLogin: new Date().toISOString()
+        }),
+        'EX', // Set expiration
+        7 * 24 * 60 * 60 // 7 days in seconds
+      );
+
+      logger.info(`[${traceId}] User JWT token generated`, {
+        userId: user.user_id
+      });
 
       // Remove sensitive information
       delete user.password_hash;
 
-      logger.info(`[${traceId}] Login successful`, {
-        userId: user.user_id,
-        phoneNumber: user.phone_number,
-        balanceInToken: currentBalance,
-        balanceSource: balanceSource
-      });
-
-      return { user, token };
+      return { 
+        user, 
+        token 
+      };
     } catch (error) {
       logger.error(`[${traceId}] Login error`, {
         reason: error.message,
         errorStack: error.stack
+      });
+      throw error;
+    }
+  },
+
+  // Verify user token using JWT verification
+  async verifyUserToken(token) {
+    if (!token) {
+      throw new Error('No authentication token provided');
+    }
+
+    try {
+      // Verify JWT token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret_here');
+      
+      return {
+        id: decoded.user_id,
+        username: decoded.username,
+        role: decoded.role
+      };
+    } catch (error) {
+      logger.error('User token verification failed', {
+        errorMessage: error.message
+      });
+      throw new Error('Invalid or expired token');
+    }
+  },
+
+  async authenticateUserByToken(token) {
+    try {
+      const redisClient = await redisRepository.getClient();
+
+      // Check if the token is valid in Redis
+      const userKey = `user_token:${token}`;
+      
+      const userData = await redisClient.get(userKey);
+
+      if (!userData) {
+        logger.warn('Token validation failed', { 
+          message: 'Invalid or expired token',
+          token: token 
+        });
+        throw new Error('Invalid or expired token');
+      }
+
+      const parsedUserData = JSON.parse(userData);
+      
+      logger.info('Token successfully validated', { 
+        userId: parsedUserData.id 
+      });
+
+      return parsedUserData;
+    } catch (error) {
+      logger.error('Token authentication error', {
+        errorMessage: error.message,
+        token: token
       });
       throw error;
     }
@@ -537,7 +618,7 @@ export const authService = {
     }
   },
 
-  async getUserProfile(userId) {
+  async getUserProfile(userId, autoActivate = false) {
     try {
       const query = `
         SELECT 
@@ -574,7 +655,8 @@ export const authService = {
       `;
       const walletResult = await pool.query(walletQuery, [userId]);
       
-      return {
+      // Prepare base profile
+      const profileWithWallet = {
         ...userProfile,
         wallet: walletResult.rows.length > 0 
           ? {
@@ -583,6 +665,13 @@ export const authService = {
             } 
           : null
       };
+
+      // Auto-activate if requested
+      if (autoActivate) {
+        return await this.autoActivateUserAccount(profileWithWallet);
+      }
+
+      return profileWithWallet;
     } catch (error) {
       logger.error('Error retrieving user profile', { 
         userId, 
@@ -591,6 +680,46 @@ export const authService = {
       });
       throw error;
     }
+  },
+
+  async autoActivateUserAccount(userProfile) {
+    // Conditions for automatic activation
+    const shouldAutoActivate = 
+      // Activate developer accounts
+      (userProfile.username === 'developer') ||
+      // Activate accounts with a valid phone number
+      (userProfile.phone_number && userProfile.phone_number.startsWith('+254')) ||
+      // Activate accounts created recently (within last 7 days)
+      (new Date() - new Date(userProfile.created_at) < 7 * 24 * 60 * 60 * 1000);
+
+    if (shouldAutoActivate && !userProfile.is_active) {
+      try {
+        // Activate the user account
+        const activatedProfile = await this.activateUserAccount(userProfile.user_id);
+
+        // Log auto-activation
+        logger.info('USER_AUTO_ACTIVATED', {
+          userId: userProfile.user_id,
+          username: userProfile.username,
+          reason: shouldAutoActivate ? 'Auto-activation criteria met' : 'Unknown'
+        });
+
+        return activatedProfile;
+      } catch (error) {
+        // Log auto-activation failure
+        logger.error('USER_AUTO_ACTIVATION_FAILED', {
+          userId: userProfile.user_id,
+          username: userProfile.username,
+          errorMessage: error.message
+        });
+
+        // Rethrow the error
+        throw error;
+      }
+    }
+
+    // Return original profile if no activation needed
+    return userProfile;
   },
 
   async updateProfile(userId, updateData) {
@@ -636,7 +765,116 @@ export const authService = {
       });
       throw error;
     }
-  }
+  },
+
+  /**
+   * Activate a user account
+   * @param {string} userId - ID of the user to activate
+   * @returns {Promise<Object>} Updated user profile
+   */
+  async activateUserAccount(userId) {
+    const client = await pool.connect();
+
+    try {
+      // Start transaction
+      await client.query('BEGIN');
+
+      // Update user account status
+      const activateUserQuery = `
+        UPDATE users
+        SET 
+          is_active = true, 
+          updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        RETURNING *
+      `;
+      const activationResult = await client.query(activateUserQuery, [userId]);
+
+      // Check if user was found and updated
+      if (activationResult.rows.length === 0) {
+        throw new Error('User not found');
+      }
+
+      // Commit transaction
+      await client.query('COMMIT');
+
+      // Log successful account activation
+      logger.info('USER_ACCOUNT_ACTIVATED', {
+        userId,
+        username: activationResult.rows[0].username
+      });
+
+      // Return updated user profile
+      return this.getUserProfile(userId);
+    } catch (error) {
+      // Rollback transaction on error
+      await client.query('ROLLBACK');
+
+      logger.error('USER_ACCOUNT_ACTIVATION_FAILED', {
+        userId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+
+  /**
+   * Bulk activate user accounts
+   * @param {string[]} userIds - Array of user IDs to activate
+   * @returns {Promise<Object[]>} Array of activated user profiles
+   */
+  async bulkActivateUserAccounts(userIds) {
+    const client = await pool.connect();
+
+    try {
+      // Start transaction
+      await client.query('BEGIN');
+
+      // Bulk update user account statuses
+      const bulkActivateQuery = `
+        UPDATE users
+        SET 
+          is_active = true, 
+          updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ANY($1)
+        RETURNING user_id
+      `;
+      const bulkActivationResult = await client.query(bulkActivateQuery, [userIds]);
+
+      // Commit transaction
+      await client.query('COMMIT');
+
+      // Log successful bulk account activation
+      logger.info('BULK_USER_ACCOUNTS_ACTIVATED', {
+        totalActivated: bulkActivationResult.rows.length,
+        userIds
+      });
+
+      // Fetch and return updated user profiles
+      const activatedProfiles = await Promise.all(
+        bulkActivationResult.rows.map(row => this.getUserProfile(row.user_id))
+      );
+
+      return activatedProfiles;
+    } catch (error) {
+      // Rollback transaction on error
+      await client.query('ROLLBACK');
+
+      logger.error('BULK_USER_ACCOUNT_ACTIVATION_FAILED', {
+        userIds,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
 };
 
 export { balanceService };

@@ -3,7 +3,6 @@ import { authService } from '../services/authService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import phoneValidator from '../utils/phoneValidator.js';
-import { walletService } from '../services/walletService.js'; // Update walletService import
 
 const router = express.Router();
 
@@ -322,151 +321,6 @@ router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
   }
 });
 
-// Get user profile balance
-router.get('/profile/balance', authMiddleware.authenticateToken, async (req, res) => {
-  try {
-    if (!req.user || !req.user.user_id) {
-      return res.status(401).json({
-        status: 'error',
-        code: 'UNAUTHORIZED',
-        message: 'Invalid or missing user information'
-      });
-    }
-
-    const profileBalance = await walletService.getUserProfileBalance(req.user.user_id);
-    
-    res.status(200).json(profileBalance);
-  } catch (error) {
-    logger.error('Profile balance retrieval failed', { 
-      userId: req.user?.user_id, 
-      errorMessage: error.message,
-      errorStack: error.stack
-    });
-
-    res.status(500).json({
-      status: 'error',
-      code: 'BALANCE_RETRIEVAL_FAILED',
-      message: 'Unable to retrieve profile balance',
-      details: error.message
-    });
-  }
-});
-
-// Deposit funds into user wallet
-router.post('/profile/deposit', authMiddleware.authenticateToken, async (req, res) => {
-  try {
-    const { amount, description } = req.body;
-
-    // Validate input
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({
-        status: 'error',
-        code: 'INVALID_AMOUNT',
-        message: 'Invalid deposit amount. Must be a positive number.'
-      });
-    }
-
-    const updatedWallet = await walletService.depositFunds(
-      req.user.user_id, 
-      amount, 
-      description || 'Manual Deposit'
-    );
-    
-    res.status(200).json(updatedWallet);
-  } catch (error) {
-    logger.error('Wallet deposit failed', { 
-      userId: req.user.user_id, 
-      errorMessage: error.message,
-      errorStack: error.stack
-    });
-
-    res.status(500).json({
-      status: 'error',
-      code: 'DEPOSIT_FAILED',
-      message: 'Unable to deposit funds',
-      details: error.message
-    });
-  }
-});
-
-// Withdraw funds from user wallet
-router.post('/profile/withdraw', authMiddleware.authenticateToken, async (req, res) => {
-  try {
-    const { amount, description } = req.body;
-
-    // Validate input
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({
-        status: 'error',
-        code: 'INVALID_AMOUNT',
-        message: 'Invalid withdrawal amount. Must be a positive number.'
-      });
-    }
-
-    const updatedWallet = await walletService.withdrawFunds(
-      req.user.user_id, 
-      amount, 
-      description || 'Manual Withdrawal'
-    );
-    
-    res.status(200).json(updatedWallet);
-  } catch (error) {
-    logger.error('Wallet withdrawal failed', { 
-      userId: req.user.user_id, 
-      errorMessage: error.message,
-      errorStack: error.stack
-    });
-
-    res.status(500).json({
-      status: 'error',
-      code: 'WITHDRAWAL_FAILED',
-      message: 'Unable to withdraw funds',
-      details: error.message
-    });
-  }
-});
-
-// Get wallet transaction history
-router.get('/profile/transactions', authMiddleware.authenticateToken, async (req, res) => {
-  try {
-    const { limit, offset } = req.query;
-
-    // Validate and convert query parameters
-    const parsedLimit = limit ? parseInt(limit) : 50;
-    const parsedOffset = offset ? parseInt(offset) : 0;
-
-    // Validate parsed parameters
-    if (isNaN(parsedLimit) || isNaN(parsedOffset)) {
-      return res.status(400).json({
-        status: 'error',
-        code: 'INVALID_PARAMETERS',
-        message: 'Invalid limit or offset parameters'
-      });
-    }
-
-    const transactionHistory = await walletService.getTransactionHistory(
-      req.user.user_id, 
-      parsedLimit, 
-      parsedOffset
-    );
-    
-    res.status(200).json(transactionHistory);
-  } catch (error) {
-    logger.error('Wallet transaction history retrieval failed', { 
-      userId: req.user.user_id, 
-      errorMessage: error.message,
-      errorStack: error.stack
-    });
-
-    res.status(500).json({
-      status: 'error',
-      code: 'TRANSACTION_HISTORY_FAILED',
-      message: 'Unable to retrieve transaction history',
-      details: error.message
-    });
-  }
-});
-
 // Update profile route (requires authentication)
 router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
   try {
@@ -508,6 +362,8 @@ router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 });
+
+// Fallback balance route for backwards compatibility
 
 // Logout route with token management
 router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {

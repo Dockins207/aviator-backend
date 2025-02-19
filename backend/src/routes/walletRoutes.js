@@ -1,5 +1,5 @@
 import express from 'express';
-import { walletService as WalletService } from '../services/walletService.js';
+import walletService from '../services/walletService.js';
 import { paymentService } from '../services/paymentGatewayService.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import logger from '../config/logger.js';
@@ -39,11 +39,11 @@ router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
     });
     
     // Fetch balance from wallets table using service method
-    const wallet = await WalletService.getWallet(userId);
+    const wallet = await walletService.getWallet(userId);
     
     if (!wallet) {
       // If no wallet exists, create a new one with 0 balance
-      const newWallet = await WalletService.createWallet(userId);
+      const newWallet = await walletService.createWallet(userId);
       
       logger.info(`[${traceId}] New wallet created`, {
         userId: userId,
@@ -53,11 +53,13 @@ router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
       
       return res.json({
         status: 'success',
-        data: {
-          balance: 'KSH 0.00',
-          rawBalance: 0,
+        wallet: {
+          balance: 0,
+          formattedBalance: 'KSH 0.00',
           currency: 'KSH',
-          createdAt: newWallet.createdAt
+          userId: userId,
+          createdAt: newWallet.createdAt,
+          lastUpdated: newWallet.updatedAt
         }
       });
     }
@@ -74,10 +76,11 @@ router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
     
     res.json({
       status: 'success',
-      data: {
-        balance: formattedBalance,
-        rawBalance: wallet.balance,
+      wallet: {
+        balance: parseFloat(wallet.balance).toFixed(2),
+        formattedBalance: formattedBalance,
         currency: wallet.currency || 'KSH',
+        userId: userId,
         createdAt: wallet.createdAt,
         lastUpdated: wallet.updatedAt
       }
@@ -111,7 +114,7 @@ router.post('/deposit', authMiddleware.authenticateToken, async (req, res) => {
     });
 
     const userId = req.user.user_id;
-    const { amount } = req.body;
+    const { amount, paymentMethod, currency } = req.body;
 
     // Validate request body
     if (!req.body || Object.keys(req.body).length === 0) {
@@ -195,10 +198,12 @@ router.post('/deposit', authMiddleware.authenticateToken, async (req, res) => {
     // Use wallet service to deposit directly
     let depositResult;
     try {
-      depositResult = await WalletService.deposit(
+      depositResult = await walletService.deposit(
         userId, 
         depositAmount, 
-        'manual' // Source identifier
+        `${paymentMethod} Deposit`, 
+        paymentMethod, 
+        currency
       );
     } catch (depositError) {
       logger.error(`[${traceId}] Wallet deposit service error`, {
@@ -303,7 +308,7 @@ router.post('/withdraw', authMiddleware.authenticateToken, async (req, res) => {
     });
 
     // Use wallet service to withdraw directly
-    const withdrawalResult = await WalletService.withdraw(
+    const withdrawalResult = await walletService.withdraw(
       userId, 
       withdrawalAmount, 
       'manual' // Source identifier
@@ -401,7 +406,7 @@ router.get('/transactions', authMiddleware.authenticateToken, async (req, res) =
     }
 
     // Fetch transaction history
-    const transactions = await WalletService.getTransactionHistory(
+    const transactions = await walletService.getTransactionHistory(
       userId, 
       parseInt(limit), 
       parseInt(offset), 

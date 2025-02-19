@@ -2,10 +2,10 @@ import { v4 as uuidv4 } from 'uuid';
 import gameUtils from '../utils/gameUtils.js';
 import gameConfig from '../config/gameConfig.js';
 import GameRepository from '../repositories/gameRepository.js';
-import RedisRepository from '../repositories/redisRepository.js';
+import RedisRepository from '../redis-services/redisRepository.js';
 import GameSessionRepository from '../repositories/gameSessionRepository.js'; 
 import logger from '../config/logger.js';
-import betTrackingService from './betTrackingService.js'; 
+import betTrackingService from '../redis-services/betTrackingService.js'; 
 
 // Custom error classes
 class GameStateError extends Error {
@@ -17,6 +17,7 @@ class GameStateError extends Error {
 
 class GameBoardService {
   static _instance = null;
+  static _gameCycleInitialized = false;
 
   constructor() {
     // Check if an instance already exists
@@ -35,12 +36,15 @@ class GameBoardService {
     GameBoardService._instance = this;
 
     // Prevent multiple game cycle starts
-    this.initializeGameCycle().catch(error => {
-      logger.error('Failed to initialize game cycle', {
-        errorMessage: error.message,
-        errorStack: error.stack
+    if (!GameBoardService._gameCycleInitialized) {
+      this.initializeGameCycle().catch(error => {
+        logger.error('Failed to initialize game cycle', {
+          errorMessage: error.message,
+          errorStack: error.stack
+        });
       });
-    });
+      GameBoardService._gameCycleInitialized = true;
+    }
   }
 
   // Static method to get the singleton instance
@@ -53,21 +57,23 @@ class GameBoardService {
 
   // Separate initialization method
   async initializeGameCycle() {
-    // Prevent multiple initializations
+    // Ensure game cycle is started only once
     if (this.gameLoopInitialized) {
       return;
     }
 
     this.gameLoopInitialized = true;
 
-    // Start game cycle
-    await this.startGameCycle().catch(error => {
-      logger.error('Failed to start initial game cycle', {
+    try {
+      // Start the game cycle
+      await this.startGameCycle();
+    } catch (error) {
+      logger.error('Game cycle initialization failed', {
         errorMessage: error.message,
         errorStack: error.stack
       });
       this.gameLoopInitialized = false;
-    });
+    }
   }
 
   // Prevent further instantiation
@@ -87,7 +93,8 @@ class GameBoardService {
       multiplier: 1.00,
       crashPoint: null,
       players: [],  
-      countdown: 5  
+      countdown: 5,  
+      activeBets: []
     };
     
     // Clear any existing intervals
@@ -106,8 +113,7 @@ class GameBoardService {
   async startGameCycle() {
     // Prevent multiple game cycles from running simultaneously
     if (this.gameLoopActive) {
-      logger.warn('Game cycle already in progress');
-      return;
+      return; 
     }
 
     this.gameLoopActive = true;
@@ -128,7 +134,8 @@ class GameBoardService {
           multiplier: 1.00,
           crashPoint: this.generateCrashPoint(),
           players: [],  
-          countdown: 5  
+          countdown: 5,  
+          activeBets: []
         };
 
         // Betting phase
@@ -190,26 +197,38 @@ class GameBoardService {
     this.gameState.status = 'betting';
     this.gameState.countdown = 5;
 
-    // Start countdown
+    // Place bets for each player
+    this.gameState.players = this.gameState.players.map(player => {
+      try {
+        // Use placeBet for each player
+        const placedBet = betTrackingService.placeBet({
+          userId: player.userId,
+          betAmount: player.betAmount,
+          gameSessionId: this.gameState.gameId
+        });
+        return placedBet;
+      } catch (error) {
+        logger.error('BET_PLACEMENT_ERROR', {
+          userId: player.userId,
+          errorMessage: error.message
+        });
+        return null;
+      }
+    }).filter(bet => bet !== null);
+
     return new Promise((resolve) => {
       this.countdownInterval = setInterval(() => {
         // Decrease countdown
         this.gameState.countdown--;
 
-        // Prepare bets for activation in the last second
-        if (this.gameState.countdown === 1) {
-          betTrackingService.prepareBetsForLastSecondActivation(this.gameState);
-        }
-
-        // Check if countdown is complete
+        // When countdown reaches 0, activate bets and resolve
         if (this.gameState.countdown <= 0) {
-          // Stop countdown
           clearInterval(this.countdownInterval);
           
-          // Collect bets from betting state
-          betTrackingService.collectBetsFromBettingState(this.gameState.players || []);
+          // Activate prepared bets
+          betTrackingService.activateBets(this.gameState);
           
-          resolve(this.gameState);
+          resolve();
         }
       }, 1000);
     });
@@ -220,94 +239,39 @@ class GameBoardService {
     // Set flying state
     this.gameState.status = 'flying';
     this.gameState.startTime = Date.now();
-    this.gameState.multiplier = 1.00;
 
-    // Generate crash point
-    this.gameState.crashPoint = this.generateCrashPoint();
-
-    // Start multiplier progression
+    // Start multiplier calculation
     return new Promise((resolve, reject) => {
-      // Activate prepared bets
-      betTrackingService.activatePreparedBets(this.gameState);
-
-      // Prepare bets for potential cashout
-      betTrackingService.prepareBetsForCashout(this.gameState);
-
       this.multiplierInterval = setInterval(() => {
-        try {
-          // Use the progression method from gameUtils
-          const previousMultiplier = this.gameState.multiplier;
-          this.gameState.multiplier = gameUtils.simulateMultiplierProgression(
-            this.gameState.multiplier, 
-            this.gameState.crashPoint
-          );
-          
-          // Check if game has crashed (exactly at crash point)
-          if (this.gameState.multiplier >= this.gameState.crashPoint) {
-            // Explicitly call crashGame method
-            this.crashGame().then(crashDetails => {
-              clearInterval(this.multiplierInterval);
-              resolve(crashDetails);
-            }).catch(error => {
-              clearInterval(this.multiplierInterval);
-              reject(error);
-            });
-          }
-        } catch (error) {
-          logger.error('Error in flying phase multiplier progression', {
-            errorMessage: error.message,
-            errorStack: error.stack
-          });
+        // Calculate multiplier
+        const elapsedTime = Date.now() - this.gameState.startTime;
+        
+        // Use simulateMultiplierProgression instead of non-existent calculateMultiplier
+        this.gameState.multiplier = gameUtils.simulateMultiplierProgression(
+          this.gameState.multiplier, 
+          this.gameState.crashPoint
+        );
+
+        // Check for crash
+        if (this.gameState.multiplier >= this.gameState.crashPoint) {
           clearInterval(this.multiplierInterval);
-          reject(error);
+          
+          // Finalize bets that haven't been cashed out
+          this.handleGameCrash();
+          
+          resolve();
         }
-      }, gameConfig.MULTIPLIER_UPDATE_INTERVAL);
+      }, 100);
     });
   }
 
-  // Crash the game when multiplier reaches crash point
-  async crashGame() {
-    try {
-      // Ensure game is in flying state before crashing
-      if (this.gameState.status !== 'flying') {
-        throw new GameStateError('Cannot crash game outside of flying phase');
-      }
+  handleGameCrash() {
+    this.gameState.status = 'crashed';
 
-      this.gameState.status = 'crashed';
-      this.gameState.multiplier = this.gameState.crashPoint;
-
-      // Optional: Log crash details
-      logger.info('Game crashed', {
-        gameId: this.gameState.gameId,
-        crashPoint: this.gameState.crashPoint
-      });
-
-      // Stop multiplier progression
-      if (this.multiplierInterval) {
-        clearInterval(this.multiplierInterval);
-      }
-
-      // Start countdown for next game
-      this.startCountdown();
-
-      // Return crash details for potential external use
-      return {
-        gameId: this.gameState.gameId,
-        crashPoint: this.gameState.crashPoint,
-        timestamp: Date.now()
-      };
-
-    } catch (error) {
-      logger.error('Error in crashGame method', {
-        error: error.message,
-        stack: error.stack
-      });
-      
-      // Ensure game state is reset even if there's an error
-      this.resetGameState();
-
-      throw error;
-    }
+    // Finalize all active bets as expired
+    this.gameState.players.forEach(bet => {
+      betTrackingService.finalizeBet(bet.betId, 'expired', this.gameState.multiplier);
+    });
   }
 
   // Get current game state

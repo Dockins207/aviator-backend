@@ -1,6 +1,6 @@
 import pkg from 'pg';
 const { Pool } = pkg;
-import logger from './logger.js';
+import logger from '../config/logger.js';
 
 // Create a new pool using the connection string
 const pool = new Pool({
@@ -25,6 +25,9 @@ const pool = new Pool({
 // Persistent connection management
 let isConnected = false;
 
+// Prevent multiple connection logs
+let _hasLoggedDatabaseConnection = false;
+
 async function connectWithRetry(maxRetries = 5) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -33,7 +36,15 @@ async function connectWithRetry(maxRetries = 5) {
       // Verify basic database functionality
       await client.query('SELECT NOW()');
       
-      logger.databaseInfo(`Database connection established successfully (Attempt ${attempt})`);
+      // Log only once, globally
+      if (!_hasLoggedDatabaseConnection) {
+        logger.info('Database connection established', { 
+          host: process.env.DB_HOST || 'localhost',
+          port: process.env.DB_PORT || 5432,
+          database: process.env.DB_NAME || 'aviator_db'
+        });
+        _hasLoggedDatabaseConnection = true;
+      }
       
       isConnected = true;
       
@@ -42,27 +53,23 @@ async function connectWithRetry(maxRetries = 5) {
       
       return true;
     } catch (err) {
-      logger.databaseError(`Database connection attempt ${attempt} failed`, { 
-        error: err.message,
-        attempt: attempt,
-        maxRetries: maxRetries,
-        host: process.env.DB_HOST || 'localhost',
-        port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-        database: process.env.DB_NAME || 'aviator_db',
-        user: process.env.DB_USER || 'admin',
-      });
+      // Log only the first and last failed attempts
+      if (attempt === 1 || attempt === maxRetries) {
+        logger.error('Database connection failed', { 
+          error: err.message,
+          attempt: attempt,
+          maxRetries: maxRetries,
+          host: process.env.DB_HOST || 'localhost',
+          port: process.env.DB_PORT || 5432,
+          database: process.env.DB_NAME || 'aviator_db'
+        });
+      }
       
-      // Wait before retrying (exponential backoff)
+      // Wait before retrying
       await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
   }
   
-  logger.databaseError('Failed to connect to the database after multiple attempts', {
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-    database: process.env.DB_NAME || 'aviator_db',
-    user: process.env.DB_USER || 'admin',
-  });
   return false;
 }
 
@@ -104,3 +111,4 @@ process.on('SIGINT', async () => {
 });
 
 export { pool, connectWithRetry };
+export default pool;

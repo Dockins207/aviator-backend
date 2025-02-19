@@ -32,6 +32,7 @@
     "node-pg-migrate": "^7.9.1",
     "node-schedule": "^2.1.1",
     "pg": "^8.11.3",
+    "sequelize": "^6.37.5",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {

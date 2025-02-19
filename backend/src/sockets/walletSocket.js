@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import { WalletRepository } from '../repositories/walletRepository.js';
 import logger from '../config/logger.js';
-import jwt from 'jsonwebtoken'; // Import jwt
+import { authService } from '../services/authService.js';
 
 class WalletSocket {
   constructor(io) {
@@ -11,50 +11,62 @@ class WalletSocket {
   }
 
   setupListeners() {
+    this.walletNamespace.use(async (socket, next) => {
+      const token = socket.handshake.auth.token;
+      
+      if (!token) {
+        return next(new Error('Authentication error: No token provided'));
+      }
+
+      try {
+        // Use the authentication middleware to verify the token
+        const user = await this.verifyUserToken(token);
+        
+        // Attach user information to the socket
+        socket.user = user;
+        next();
+      } catch (error) {
+        logger.warn('Socket authentication failed', {
+          errorMessage: error.message
+        });
+        return next(new Error('Authentication failed'));
+      }
+    });
+
     this.walletNamespace.on('connection', async (socket) => {
-      socket.on('authenticate', async (token) => {
-        try {
-          // Verify and decode the token
-          const decoded = jwt.verify(token, process.env.JWT_SECRET);
-          
-          // Attach user information to the socket
-          socket.user = {
-            id: decoded.user_id,
-            username: decoded.username,
-            role: decoded.role
-          };
+      // Immediately fetch and emit wallet balance
+      await this.emitUserWalletBalance(socket.user.id);
 
-          // Immediately fetch and emit wallet balance
-          await this.emitUserWalletBalance(socket.user.id);
-
-          // Acknowledge successful connection and balance fetch
-          socket.emit('wallet:connected', { 
-            status: 'success', 
-            message: 'Wallet socket connected and balance fetched',
-            userId: socket.user.id
-          });
-        } catch (error) {
-          logger.warn('Socket authentication failed', {
-            errorMessage: error.message
-          });
-          socket.emit('error', { 
-            code: 'AUTH_FAILED', 
-            message: 'Authentication failed' 
-          });
-          socket.disconnect(true);
-        }
+      // Acknowledge successful connection and balance fetch
+      socket.emit('wallet:connected', { 
+        status: 'success', 
+        message: 'Wallet socket connected and balance fetched',
+        userId: socket.user.id
       });
 
       // Wallet Balance Endpoints
       socket.on('wallet:get_balance', async () => {
         if (!socket.user) {
           socket.emit('error', { 
-            code: 'NOT_AUTHENTICATED', 
-            message: 'User not authenticated' 
+            code: 'AUTH_FAILED', 
+            message: 'Authentication required' 
           });
           return;
         }
-        await this.emitUserWalletBalance(socket.user.id);
+        
+        try {
+          const balance = await this.getUserWalletBalance(socket.user.id);
+          socket.emit('wallet:balance', { balance });
+        } catch (error) {
+          logger.error('Failed to get wallet balance', {
+            userId: socket.user.id,
+            errorMessage: error.message
+          });
+          socket.emit('error', { 
+            code: 'BALANCE_FETCH_FAILED', 
+            message: 'Could not retrieve wallet balance' 
+          });
+        }
       });
 
       // Deposit Funds Endpoint
@@ -78,30 +90,51 @@ class WalletSocket {
           // Perform deposit
           const depositResult = await WalletRepository.deposit(
             socket.user.id, 
+            null, // Let repository find wallet
             amount, 
-            description
+            description,
+            'manual',
+            'KSH'
           );
 
-          // Emit successful deposit event
+          // Immediate socket event for deposit success
+          this.walletNamespace.to(socket.user.id).emit('wallet:update', {
+            userId: socket.user.id,
+            walletId: depositResult.walletId,
+            balance: depositResult.newBalance,
+            transactionType: 'deposit',
+            amount: amount,
+            description: description,
+            timestamp: new Date().toISOString()
+          });
+
+          // Log successful deposit
+          logger.info('WALLET_DEPOSIT_SUCCESS', { 
+            userId: socket.user.id, 
+            amount,
+            newBalance: depositResult.newBalance
+          });
+
+          // Optional: Confirm deposit to the initiating socket
           socket.emit('wallet:deposit:success', {
             status: 'success',
-            amount: depositResult.amount,
+            amount: amount,
             balance: depositResult.newBalance,
             transactionId: depositResult.transactionId,
             timestamp: new Date().toISOString()
           });
 
-          // Broadcast updated balance to the user
-          await this.emitUserWalletBalance(socket.user.id);
         } catch (error) {
-          logger.error('Wallet deposit failed', {
+          logger.error('WALLET_DEPOSIT_FAILED', {
             userId: socket.user.id,
+            amount: depositData.amount,
             errorMessage: error.message
           });
 
           socket.emit('wallet:deposit:error', {
-            code: 'DEPOSIT_FAILED',
-            message: error.message
+            status: 'error',
+            message: error.message,
+            timestamp: new Date().toISOString()
           });
         }
       });
@@ -151,6 +184,154 @@ class WalletSocket {
           socket.emit('wallet:withdraw:error', {
             code: 'WITHDRAW_FAILED',
             message: error.message
+          });
+        }
+      });
+
+      // Bet Placement Endpoint
+      socket.on('wallet:place_bet', async (betData) => {
+        if (!socket.user) {
+          socket.emit('wallet:bet:error', { 
+            code: 'NOT_AUTHENTICATED', 
+            message: 'User not authenticated' 
+          });
+          return;
+        }
+
+        try {
+          const { amount, gameId } = betData;
+          
+          // Validate bet amount
+          if (!amount || amount <= 0) {
+            throw new Error('Invalid bet amount');
+          }
+
+          // Perform bet placement
+          const betResult = await WalletRepository.deposit(
+            socket.user.id, 
+            null, // Let repository find wallet
+            -amount, // Negative amount for bet
+            `Bet Placement for Game ${gameId}`,
+            'game_bet',
+            'KSH'
+          );
+
+          // Immediate socket event for bet placement
+          this.walletNamespace.to(socket.user.id).emit('wallet:update', {
+            userId: socket.user.id,
+            walletId: betResult.walletId,
+            balance: betResult.newBalance,
+            transactionType: 'bet',
+            amount: amount,
+            gameId: gameId,
+            timestamp: new Date().toISOString()
+          });
+
+          // Log successful bet placement
+          logger.info('WALLET_BET_PLACED', { 
+            userId: socket.user.id, 
+            amount,
+            gameId,
+            newBalance: betResult.newBalance
+          });
+
+          // Confirm bet placement to the initiating socket
+          socket.emit('wallet:bet:success', {
+            status: 'success',
+            amount: amount,
+            balance: betResult.newBalance,
+            gameId: gameId,
+            transactionId: betResult.transactionId,
+            timestamp: new Date().toISOString()
+          });
+
+        } catch (error) {
+          logger.error('WALLET_BET_PLACEMENT_FAILED', {
+            userId: socket.user.id,
+            amount: betData.amount,
+            gameId: betData.gameId,
+            errorMessage: error.message
+          });
+
+          socket.emit('wallet:bet:error', {
+            status: 'error',
+            message: error.message,
+            gameId: betData.gameId,
+            timestamp: new Date().toISOString()
+          });
+        }
+      });
+
+      // Cashout Endpoint
+      socket.on('wallet:cashout', async (cashoutData) => {
+        if (!socket.user) {
+          socket.emit('wallet:cashout:error', { 
+            code: 'NOT_AUTHENTICATED', 
+            message: 'User not authenticated' 
+          });
+          return;
+        }
+
+        try {
+          const { amount, gameId } = cashoutData;
+          
+          // Validate cashout amount
+          if (!amount || amount <= 0) {
+            throw new Error('Invalid cashout amount');
+          }
+
+          // Perform cashout
+          const cashoutResult = await WalletRepository.deposit(
+            socket.user.id, 
+            null, // Let repository find wallet
+            amount, 
+            `Game Cashout for Game ${gameId}`,
+            'game_cashout',
+            'KSH'
+          );
+
+          // Immediate socket event for cashout
+          this.walletNamespace.to(socket.user.id).emit('wallet:update', {
+            userId: socket.user.id,
+            walletId: cashoutResult.walletId,
+            balance: cashoutResult.newBalance,
+            transactionType: 'cashout',
+            amount: amount,
+            gameId: gameId,
+            timestamp: new Date().toISOString()
+          });
+
+          // Log successful cashout
+          logger.info('WALLET_CASHOUT_SUCCESS', { 
+            userId: socket.user.id, 
+            amount,
+            gameId,
+            newBalance: cashoutResult.newBalance
+          });
+
+          // Confirm cashout to the initiating socket
+          socket.emit('wallet:cashout:success', {
+            status: 'success',
+            amount: amount,
+            balance: cashoutResult.newBalance,
+            gameId: gameId,
+            transactionId: cashoutResult.transactionId,
+            timestamp: new Date().toISOString()
+          });
+
+        } catch (error) {
+          logger.error('WALLET_CASHOUT_FAILED', {
+            userId: socket.user.id,
+            amount: cashoutData.amount,
+            gameId: cashoutData.gameId,
+            errorMessage: error.message
+          });
+
+          socket.emit('wallet:cashout:error', {
+            status: 'error',
+            message: error.message,
+            gameId: cashoutData.gameId,
+            timestamp: new Date().toISOString()
           });
         }
       });
@@ -280,6 +461,11 @@ class WalletSocket {
     });
   }
 
+  async verifyUserToken(token) {
+    // Use the authentication middleware to verify the token
+    return await authService.verifyUserToken(token);
+  }
+
   async emitUserWalletBalance(userId) {
     try {
       // Add a 0.5-second delay before emitting balance
@@ -305,91 +491,33 @@ class WalletSocket {
     }
   }
 
-  async broadcastWalletUpdate(userId, transactionType, transactionDetails) {
-    try {
-      // Add a 0.5-second delay before emitting update
-      await new Promise(resolve => setTimeout(resolve, 500));
+  async getUserWalletBalance(userId) {
+    // Implement wallet balance retrieval logic
+    const walletRepository = await import('../repositories/walletRepository.js');
+    return await walletRepository.default.getUserWalletBalance(userId);
+  }
 
-      // Fetch the latest wallet balance
-      const wallet = await WalletRepository.getWalletByUserId(userId);
-      
-      if (wallet) {
-        // Broadcast transaction and balance update
-        this.walletNamespace.to(userId).emit('wallet:transaction_update', {
-          userId: userId,
-          transactionType: transactionType,
-          transactionDetails: transactionDetails,
-          balance: wallet.balance,
-          formattedBalance: `KSH ${wallet.balance.toFixed(2)}`,
-          timestamp: new Date().toISOString()
-        });
+  // Emit wallet update to specific user
+  emitWalletUpdate(payload) {
+    try {
+      // Validate payload
+      if (!payload.userId) {
+        logger.warn('WALLET_UPDATE_MISSING_USER_ID', { payload });
+        return;
       }
-    } catch (error) {
-      logger.error('Failed to broadcast wallet update', {
-        userId,
-        transactionType,
-        errorMessage: error.message
-      });
-    }
-  }
 
-  async validateToken(token, userId) {
-    try {
-      // Implement token validation logic
-      // This should check if the token is valid and belongs to the specified user
-      // You might want to use your existing JWT verification method
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      return decoded.userId === userId;
-    } catch (error) {
-      logger.warn('Token validation failed', {
-        userId,
-        errorMessage: error.message
-      });
-      return false;
-    }
-  }
+      // Emit to the wallet namespace
+      this.walletNamespace.to(payload.userId).emit('wallet:update', payload);
 
-  async trackWalletEvent(userId, eventType, amount, description) {
-    try {
-      const eventData = {
-        userId: userId,
-        eventType: eventType,
-        amount: parseFloat(amount),
-        description: description,
-        timestamp: new Date().toISOString()
-      };
-
-      // Emit the event to the user's socket
-      this.walletNamespace.to(userId).emit('wallet:event', eventData);
-      
-      // Optionally, broadcast the updated balance
-      await this.broadcastWalletUpdate(userId, eventType, eventData);
-    } catch (error) {
-      logger.error('Error tracking wallet event', { 
-        userId, 
-        eventType,
-        errorMessage: error.message 
-      });
-    }
-  }
-
-  async broadcastGlobalWalletUpdates() {
-    try {
-      const wallets = await WalletRepository.getAllUserWallets();
-      
-      wallets.forEach(wallet => {
-        const updateData = {
-          userId: wallet.userId,
-          balance: parseFloat(wallet.balance),
-          currency: wallet.currency,
-          updatedAt: new Date().toISOString()
-        };
-
-        this.walletNamespace.to(wallet.userId).emit('wallet:global_update', updateData);
+      logger.info('WALLET_SOCKET_UPDATE_SENT', { 
+        userId: payload.userId,
+        transactionType: payload.transactionType,
+        amount: payload.amount
       });
     } catch (error) {
-      logger.error('Error broadcasting global wallet updates', { 
-        errorMessage: error.message 
+      logger.error('WALLET_SOCKET_UPDATE_ERROR', {
+        errorMessage: error.message,
+        payload
       });
     }
   }
