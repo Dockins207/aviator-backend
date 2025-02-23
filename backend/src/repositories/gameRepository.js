@@ -503,8 +503,63 @@ class GameRepository {
    * @returns {Promise<Object>} Created game session
    */
   static async createGameSession(gameType = 'aviator', status = 'in_progress') {
-    logger.info('Direct game session creation prevented', { gameType, status });
-    return null;
+    try {
+      const query = `
+        INSERT INTO game_sessions (
+          game_type, 
+          status
+        ) VALUES (
+          $1, 
+          $2
+        ) RETURNING game_session_id, game_type, status, created_at
+      `;
+
+      const result = await global.pool.query(query, [gameType, status]);
+
+      logger.info('GAME_SESSION_CREATED', {
+        gameSessionId: result.rows[0].game_session_id,
+        gameType,
+        status
+      });
+
+      return result.rows[0];
+    } catch (error) {
+      logger.error('GAME_SESSION_CREATION_ERROR', {
+        errorMessage: error.message,
+        gameType,
+        status
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Create a new game session
+   * @param {string} gameType - Type of game
+   * @param {string} originalGameId - Original game ID
+   * @returns {Promise<Object>} Created game session
+   */
+  static async createGameSession(gameType, originalGameId) {
+    // Directly create game session with 'in_progress' status
+    const query = `
+      INSERT INTO game_sessions (
+        game_type, 
+        status
+      ) VALUES (
+        $1, 
+        $2
+      ) RETURNING game_session_id, game_type, status, created_at
+    `;
+
+    const result = await global.pool.query(query, [gameType, 'in_progress']);
+
+    logger.info('GAME_SESSION_CREATED', {
+      gameSessionId: result.rows[0].game_session_id,
+      gameType,
+      status: 'in_progress'
+    });
+
+    return result.rows[0];
   }
 
   /**
@@ -838,17 +893,6 @@ class GameRepository {
   }
 
   /**
-   * Create a new game session
-   * @param {string} gameType - Type of game
-   * @param {string} originalGameId - Original game ID
-   * @returns {Promise<Object>} Created game session
-   */
-  static async createGameSession(gameType, originalGameId) {
-    logger.info('Direct game session creation prevented', { gameType, originalGameId });
-    return null;
-  }
-
-  /**
    * Update a player's bet record
    * @param {Object} betUpdateData - Bet update details
    * @param {string} betUpdateData.playerBetId - Unique bet identifier
@@ -1005,6 +1049,29 @@ class GameRepository {
       });
 
       throw error;
+    }
+  }
+
+  async storeBet(betDetails) {
+    const { userId, amount, gameSessionId } = betDetails;
+
+    const query = `
+      INSERT INTO player_bets (user_id, amount, game_session_id, created_at)
+      VALUES ($1, $2, $3, NOW())
+      RETURNING id;
+    `;
+
+    const values = [userId, amount, gameSessionId];
+
+    try {
+      const result = await this.pool.query(query, values);
+      return result.rows[0].id; // Return the ID of the newly created bet
+    } catch (error) {
+      logger.error('BET_STORAGE_ERROR', {
+        errorMessage: error.message,
+        betDetails
+      });
+      throw new Error('Failed to store bet');
     }
   }
 }

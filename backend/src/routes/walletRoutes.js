@@ -33,11 +33,6 @@ router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
       });
     }
 
-    logger.info(`[${traceId}] Balance retrieval request`, {
-      userId: userId,
-      requestTimestamp: new Date().toISOString()
-    });
-    
     // Fetch balance from wallets table using service method
     const wallet = await walletService.getWallet(userId);
     
@@ -66,13 +61,6 @@ router.get('/balance', authMiddleware.authenticateToken, async (req, res) => {
     
     // Format balance with currency symbol before the amount
     const formattedBalance = formatBalance(wallet.balance, wallet.currency);
-    
-    logger.info(`[${traceId}] Balance retrieved successfully`, {
-      userId: userId,
-      balance: formattedBalance,
-      currency: wallet.currency,
-      lastUpdated: wallet.updatedAt
-    });
     
     res.json({
       status: 'success',

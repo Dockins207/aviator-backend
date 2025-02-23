@@ -59,7 +59,7 @@ router.get('/history', (req, res) => {
 });
 
 // Place a bet
-router.post('/place', authMiddleware.authenticateToken, (req, res) => {
+router.post('/place-bet', authMiddleware.authenticateToken, (req, res) => {
   try {
     const { amount } = req.body;
     const user = req.user.id; // Extract user ID from authenticated token

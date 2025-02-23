@@ -10,6 +10,7 @@ import { pool, connectWithRetry } from './config/database.js';
 import { WalletRepository } from './repositories/walletRepository.js';
 import gameService from './services/gameService.js';
 import notificationService from './services/notificationService.js';
+import statsService from './services/statsService.js';
 import errorMiddleware from './middleware/errorMiddleware.js';
 import authRoutes from './routes/authRoutes.js';
 import gameRoutes from './routes/gameRoutes.js';
@@ -18,6 +19,9 @@ import betRoutes from './routes/betRoutes.js';
 import { initializeStatsService } from './routes/betRoutes.js';
 import schedule from 'node-schedule';
 import { authService } from './services/authService.js';
+import wagerMonitorSocket from './sockets/wagerMonitorSocket.js';
+import redisRepository from './redis-services/redisRepository.js';
+import socketManager from './sockets/socketManager.js';
 
 // Load environment variables
 dotenv.config();
@@ -33,14 +37,37 @@ const app = express();
 // Completely open CORS configuration for development
 const corsOptions = {
   origin: function(origin, callback) {
-    // Allow any origin during development
-    callback(null, true);
+    const allowedOrigins = [
+      'http://localhost:3000', 
+      'http://localhost:8000',
+      'https://aviator.game', 
+      'https://www.aviator.game',
+      'http://192.168.0.11:3000',
+      'http://192.168.0.12:3000',
+      'http://192.168.0.12:8000'
+    ];
+
+    // Check if origin is undefined (for same-origin requests) or in allowed list
+    if (!origin || allowedOrigins.includes(origin) || 
+        (origin && /^http:\/\/192\.168\.0\.\d+:\d+$/.test(origin))) {
+      callback(null, true);
+    } else {
+      logger.warn('SOCKET_CORS_ORIGIN_REJECTED', {
+        service: 'aviator-backend',
+        origin: origin,
+        allowedOrigins: allowedOrigins
+      });
+      // Allow all origins during development if not in production
+      if (process.env.NODE_ENV !== 'production') {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    }
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Origin', 'Accept'],
-  credentials: true,
-  optionsSuccessStatus: 200,
-  maxAge: 3600
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token'],
+  credentials: true
 };
 
 // Middleware
@@ -87,24 +114,100 @@ async function startServer() {
     }
 
     console.log('Database connection established');
+
+    // Setup game session validator for Redis repository
+    redisRepository.setGameSessionValidator(async (providedSessionId) => {
+      try {
+        // Use gameService to validate the session ID
+        const currentGameState = gameService.gameState || {};
+        
+        // Check if the provided session ID matches the current game session ID
+        if (!currentGameState || !currentGameState.gameId) {
+          logger.warn('GAME_SESSION_STATE_UNAVAILABLE', {
+            message: 'Current game state not found',
+            providedSessionId
+          });
+          return false;
+        }
+
+        const isValid = providedSessionId === currentGameState.gameId;
+
+        if (!isValid) {
+          logger.warn('SESSION_ID_MISMATCH', {
+            providedSessionId,
+            currentGameSessionId: currentGameState.gameId,
+            context: 'server_initialization'
+          });
+        }
+
+        return isValid;
+      } catch (error) {
+        logger.error('GAME_SESSION_VALIDATOR_ERROR', {
+          errorMessage: error.message,
+          providedSessionId
+        });
+        return false;
+      }
+    });
+
     // Create HTTP server
     const httpServer = createServer(app);
 
     // Configure Socket.IO with CORS
-    const io = new SocketIOServer(httpServer, {
+    const socketOptions = {
       cors: {
         origin: function(origin, callback) {
-          // Allow any origin during development
-          // In production, replace with specific frontend URLs
-          callback(null, true);
+          const ALLOWED_ORIGINS = [
+            'http://localhost:3000', 
+            'http://localhost:8000',
+            'https://aviator.game', 
+            'https://www.aviator.game',
+            'http://192.168.0.11:3000',
+            'http://192.168.0.12:3000',
+            'http://192.168.0.12:8000'
+          ];
+
+          // If no origin (like in server-to-server communication), allow
+          if (!origin) {
+            callback(null, true);
+            return;
+          }
+
+          // Check if origin is in allowed list or matches local network pattern
+          if (ALLOWED_ORIGINS.includes(origin) || 
+              /^http:\/\/192\.168\.0\.\d+:\d+$/.test(origin)) {
+            callback(null, true);
+          } else {
+            logger.warn('SOCKET_CORS_ORIGIN_REJECTED', {
+              origin,
+              allowedOrigins: ALLOWED_ORIGINS
+            });
+
+            // Allow all origins during development if not in production
+            if (process.env.NODE_ENV !== 'production') {
+              callback(null, true);
+            } else {
+              callback(new Error('Not allowed by CORS'));
+            }
+          }
         },
         methods: ['GET', 'POST'],
-        allowedHeaders: ['Authorization', 'Content-Type'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token'],
         credentials: true
       },
       pingTimeout: 60000, // Increased timeout
-      pingInterval: 25000 // Increased interval
-    });
+      pingInterval: 25000, // Increased interval
+      maxHttpBufferSize: 1e6, // 1 MB max payload
+      connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+        skipMiddlewares: true
+      }
+    };
+
+    const io = new SocketIOServer(httpServer, socketOptions);
+
+    // Initialize socket manager
+    socketManager.initialize(io);
 
     // Import socket and game modules dynamically
     Promise.all([
@@ -125,6 +228,9 @@ async function startServer() {
       // Explicitly set Socket.IO for notification service
       notificationService.setSocketIO(io);
       
+      // Explicitly set Socket.IO for stats service
+      statsService.setSocketIO(io);
+      
       // Initialize wallet socket
       const walletSocket = new WalletSocketClass(io);
       
@@ -138,6 +244,8 @@ async function startServer() {
         const betSocket = new BetSocketInitializer.default(io);
         betSocket.initialize();
       }
+
+      wagerMonitorSocket(io);
 
       // Initialize stats service
       initializeStatsService(io);
@@ -170,7 +278,7 @@ async function startServer() {
     app.use('/api/auth', authRoutes);
     app.use('/api/game', gameRoutes);
     app.use('/api/wallet', walletRoutes);
-    app.use('/api/bet', betRoutes);
+    app.use('/api/bets', betRoutes);  
     app.get('/', (req, res) => {
       res.json({ 
         message: 'Aviator Game Backend', 

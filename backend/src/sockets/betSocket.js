@@ -21,31 +21,74 @@ class BetSocket {
       // Place bet
       socket.on('placeBet', async (betData, callback) => {
         try {
-          // Validate socket authentication
-          if (!socket.user) {
-            throw new Error('User not authenticated');
-          }
-
-          const { 
-            amount
-          } = betData;
-
-          // Validate bet amount
-          const betAmount = Number(amount);
-          if (isNaN(betAmount) || betAmount <= 0) {
+          // ABSOLUTE Authentication Validation
+          if (!socket.user || !socket.user.user_id) {
+            logger.error('SOCKET_BET_PLACEMENT_AUTH_FAILURE', {
+              context: 'placeBet',
+              details: 'No authenticated user or missing user_id',
+              socketId: socket.id
+            });
             return callback({
               success: false,
-              message: 'Invalid bet amount',
+              message: 'SECURITY_VIOLATION_AUTHENTICATION_REQUIRED',
               type: 'error'
             });
           }
 
-          // Check maximum bet limit
-          const MAX_BET_AMOUNT = 10000;  // Adjust as needed
-          if (betAmount > MAX_BET_AMOUNT) {
+          // COMPREHENSIVE Bet Data Logging
+          logger.warn('INCOMING_BET_DATA_DIAGNOSTIC', {
+            fullBetData: JSON.stringify(betData),
+            betDataKeys: Object.keys(betData),
+            socketUserId: socket.user.user_id,
+            socketUsername: socket.user.username,
+            socketId: socket.id
+          });
+
+          // STRICT Bet Data Validation
+          const { amount: betAmount, autoCashoutEnabled, autoCashoutMultiplier } = betData;
+
+          // Log and remove unexpected fields
+          const unexpectedFields = Object.keys(betData).filter(
+            key => !['amount', 'autoCashoutEnabled', 'autoCashoutMultiplier'].includes(key)
+          );
+
+          if (unexpectedFields.length > 0) {
+            logger.warn('UNEXPECTED_BET_DATA_FIELDS', {
+              context: 'placeBet',
+              unexpectedFields,
+              socketId: socket.id,
+              userId: socket.user.user_id
+            });
+          }
+
+          // Validate bet amount
+          if (typeof betAmount !== 'number' || isNaN(betAmount) || betAmount <= 0) {
+            logger.error('INVALID_BET_AMOUNT', {
+              context: 'placeBet',
+              betAmount,
+              socketId: socket.id,
+              userId: socket.user.user_id
+            });
             return callback({
               success: false,
-              message: `Bet amount too high. Maximum bet is ${MAX_BET_AMOUNT}`,
+              message: 'SECURITY_VIOLATION_INVALID_BET_AMOUNT',
+              type: 'error'
+            });
+          }
+
+          // Check maximum bet limit with comprehensive validation
+          const MAX_BET_AMOUNT = 10000;  // Configurable limit
+          if (betAmount > MAX_BET_AMOUNT) {
+            logger.error('SOCKET_BET_PLACEMENT_AMOUNT_LIMIT_EXCEEDED', {
+              context: 'placeBet',
+              betAmount,
+              maxBetAmount: MAX_BET_AMOUNT,
+              userId: socket.user.user_id,
+              socketId: socket.id
+            });
+            return callback({
+              success: false,
+              message: `SECURITY_VIOLATION_BET_AMOUNT_LIMIT_EXCEEDED: Maximum bet is ${MAX_BET_AMOUNT}`,
               type: 'error',
               details: {
                 originalAmount: betAmount,
@@ -54,160 +97,155 @@ class BetSocket {
             });
           }
 
+          // Comprehensive user context logging
+          logger.info('SOCKET_BET_PLACEMENT_USER_CONTEXT', {
+            userId: socket.user.user_id,
+            username: socket.user.username,
+            socketId: socket.id,
+            userRoles: socket.user.roles
+          });
+
+          // Place bet with complete user context
           const result = await this.betService.placeBet({
-            userId: socket.user.id,  // Include user ID
             amount: betAmount,
-            betDataType: typeof betAmount,
-            betDataValue: betAmount
+            autoCashoutEnabled,
+            autoCashoutMultiplier,
+            userId: socket.user.user_id,  // Explicitly include user ID
+            user: socket.user  // Include full user object
           }, { 
-            user: socket.user,  // Pass socket user in the req object
-            socket: socket  // Optional: pass socket for additional context
+            user: socket.user,  // Pass complete socket user
+            socket: socket  // Provide full socket context
           });
 
-          // Broadcast bet placement to all clients
-          this.io.emit('betPlaced', {
+          // Simplified success notification
+          this.io.emit('bet:placed', {
             betId: result.betId,
-            amount: betAmount,
-            userId: socket.user.id,
-            gameSessionId: result.gameSessionId
+            amount: betAmount
           });
 
-          // Detailed callback with success response
+          // Concise, user-friendly callback
           callback({
             success: true,
-            message: 'Bet placed successfully!',
-            type: 'success',
-            betId: result.betId,
-            amount: betAmount,
-            gameSessionId: result.gameSessionId
+            message: 'Bet placed',
+            betId: result.betId
           });
         } catch (error) {
-          // Detailed error callback
+          // Simplified error handling with ultra-short messages
+          const errorMessages = {
+            'INSUFFICIENT_FUNDS': 'Low balance',
+            'BET_LIMIT_EXCEEDED': 'Bet too high',
+            'GAME_NOT_ACTIVE': 'Game paused',
+            'default': 'Bet failed'
+          };
+
+          const userFriendlyMessage = errorMessages[error.code] || errorMessages['default'];
+
+          // Broadcast bet placement error
+          this.io.emit('bet:error', {
+            message: userFriendlyMessage,
+            code: error.code || 'ERROR'
+          });
+
+          // Simplified error notification
           callback({ 
             success: false, 
-            message: error.message || 'Bet placement failed',
-            type: 'error'
+            message: userFriendlyMessage,
+            code: error.code || 'ERROR'
           });
         }
       });
 
-      // Cashout bet
+      // Cashout handling
       socket.on('cashout', async (cashoutData) => {
         try {
-          // Comprehensive logging of entire cashout data
-          logger.warn('CASHOUT_EVENT_RECEIVED', {
-            fullCashoutData: JSON.stringify(cashoutData),
-            dataType: typeof cashoutData,
-            keys: Object.keys(cashoutData || {})
-          });
+          // Retrieve active bets for cashout
+          const activeBetsForCashout = await this.betService.getActiveBetsForCashout(
+            cashoutData.gameSessionId, 
+            socket.user.user_id
+          );
+
+          // If no active bets, return early
+          if (activeBetsForCashout.length === 0) {
+            return this.sendErrorResponse(socket, {
+              message: 'No active bets available for cashout',
+              code: 'NO_ACTIVE_BETS'
+            });
+          }
+
+          // Find the specific bet to cashout if betId is provided
+          const betToCashout = cashoutData.betId 
+            ? activeBetsForCashout.find(bet => bet.id === cashoutData.betId)
+            : activeBetsForCashout[0];
+
+          if (!betToCashout) {
+            return this.sendErrorResponse(socket, {
+              message: 'Specified bet not found or not active',
+              code: 'BET_NOT_FOUND'
+            });
+          }
 
           // Robust multiplier extraction
           const rawMultiplier = cashoutData?.multiplier ?? 
                                 cashoutData?.cashoutMultiplier ?? 
-                                cashoutData;
+                                1.00;
 
-          // Detailed logging of multiplier
-          logger.warn('MULTIPLIER_EXTRACTION', {
-            rawMultiplier,
-            type: typeof rawMultiplier,
-            isObject: rawMultiplier instanceof Object,
-            stringValue: String(rawMultiplier)
-          });
-
-          // Robust multiplier parsing
-          const cashoutMultiplier = (() => {
-            if (typeof rawMultiplier === 'number') {
-              return rawMultiplier;
-            }
-
-            if (typeof rawMultiplier === 'string') {
-              const parsedMultiplier = parseFloat(rawMultiplier);
-              if (!isNaN(parsedMultiplier)) {
-                return parsedMultiplier;
-              }
-            }
-
-            // Throw error with detailed context
-            throw new Error(`Invalid multiplier: type=${typeof rawMultiplier}, value=${rawMultiplier}`);
-          })();
-
-          // Enhanced multiplier validation
-          if (cashoutMultiplier <= 1) {
-            throw new Error('Cashout multiplier must be greater than 1');
+          // Validate and parse multiplier
+          const cashoutMultiplier = Number(rawMultiplier);
+          if (isNaN(cashoutMultiplier) || cashoutMultiplier <= 1.00) {
+            return this.sendErrorResponse(socket, {
+              message: 'Invalid cashout multiplier',
+              code: 'INVALID_MULTIPLIER'
+            });
           }
 
-          // Comprehensive logging of cashout request
-          logger.info('CASHOUT_REQUEST_PROCESSING', {
-            userId: socket.user.id,
-            rawMultiplier: cashoutData.multiplier,
-            processedMultiplier: cashoutMultiplier,
-            inputType: typeof cashoutData.multiplier,
+          // Log cashout attempt
+          logger.info('CASHOUT_ATTEMPT', {
+            userId: socket.user.user_id,
+            betId: betToCashout.id,
             socketId: socket.id
           });
 
-          // Securely retrieve bet for cashout
-          const { cashoutToken, betDetails } = await this.betService.retrieveBetForCashout({
-            userId: socket.user.id,
-            cashoutMultiplier
+          // Simplified cashout result processing
+          const cashoutResult = await this.betService.processCashout(
+            betToCashout, 
+            cashoutMultiplier, 
+            socket.user.user_id
+          );
+
+          // Ultra-concise success notification
+          this.io.emit('cashout:success', {
+            betId: betToCashout.id,
+            amount: cashoutResult.amount
           });
 
-          // Log bet details before cashout
-          logger.info('CASHOUT_BET_DETAILS', {
-            betId: betDetails.betId,
-            betAmount: betDetails.betAmount,
-            userId: socket.user.id
+          // Concise callback
+          callback({
+            success: true,
+            message: 'Cashed out'
           });
-
-          // Perform cashout using the secure token
-          const cashoutResult = await this.betService.cashoutBet({
-            cashoutToken,
-            cashoutMultiplier
-          });
-
-          // Log successful cashout
-          logger.info('CASHOUT_SUCCESS', {
-            userId: socket.user.id,
-            betId: betDetails.betId,
-            cashoutMultiplier,
-            payout: cashoutResult.payout,
-            socketId: socket.id
-          });
-
-          // Broadcast cashout event (without exposing sensitive details)
-          this.io.emit('betCashedOut', {
-            userId: socket.user.id,
-            cashoutMultiplier,
-            payout: cashoutResult.payout
-          });
-
-          // Successful cashout callback
-          // callback({
-          //   success: true,
-          //   message: 'Bet cashed out successfully!',
-          //   type: 'success',
-          //   details: {
-          //     payout: cashoutResult.payout,
-          //     cashoutMultiplier
-          //   }
-          // });
         } catch (error) {
-          // Comprehensive error handling and logging
-          logger.error('CASHOUT_ERROR', {
-            errorMessage: error.message,
-            stack: error.stack,
-            userId: socket.user?.id,
-            rawInput: cashoutData.multiplier,
-            socketId: socket.id
+          // Ultra-short error messages for cashout
+          const errorMessages = {
+            'NO_ACTIVE_BETS': 'No bets',
+            'CASHOUT_DISABLED': 'Cashout locked',
+            'MULTIPLIER_TOO_LOW': 'Multiplier low',
+            'GAME_ENDED': 'Game over',
+            'default': 'Cashout failed'
+          };
+
+          const userFriendlyMessage = errorMessages[error.code] || errorMessages['default'];
+
+          // Broadcast cashout error
+          this.io.emit('cashout:error', {
+            message: userFriendlyMessage,
+            code: error.code || 'ERROR'
           });
 
-          // callback({
-          //   success: false,
-          //   message: error.message || 'Cashout failed',
-          //   type: 'error',
-          //   details: {
-          //     rawMultiplier: cashoutData.multiplier
-          //   }
-          // });
+          // Concise error callback
+          callback({
+            success: false,
+            message: userFriendlyMessage
+          });
         }
       });
 

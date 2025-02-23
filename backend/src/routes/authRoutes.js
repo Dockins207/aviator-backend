@@ -402,4 +402,73 @@ router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {
   }
 });
 
+// Refresh token route
+router.post('/refresh', async (req, res) => {
+  try {
+    // Extract refresh token from multiple possible sources
+    const refreshToken = 
+      req.body.refreshToken || 
+      req.headers['x-refresh-token'] || 
+      req.query.refreshToken;
+
+    if (!refreshToken) {
+      logger.error('REFRESH_TOKEN_MISSING', {
+        source: 'refresh_route'
+      });
+      return res.status(400).json({ 
+        error: 'Refresh token is required',
+        code: 'MISSING_REFRESH_TOKEN'
+      });
+    }
+
+    // Attempt to refresh access token
+    const { accessToken, refreshToken: newRefreshToken, user } = 
+      await authService.refreshAccessToken(refreshToken);
+
+    // Log successful token refresh
+    logger.info('TOKEN_REFRESH_SUCCESSFUL', {
+      userId: user.user_id,
+      tokenRefreshed: true
+    });
+
+    // Return new tokens
+    res.json({
+      accessToken,
+      refreshToken: newRefreshToken,
+      user: {
+        user_id: user.user_id,
+        username: user.username
+      }
+    });
+  } catch (error) {
+    // Detailed error logging
+    logger.error('TOKEN_REFRESH_FAILED', {
+      errorMessage: error.message,
+      errorName: error.name,
+      source: 'refresh_route'
+    });
+
+    // Specific error responses
+    if (error.message.includes('expired')) {
+      return res.status(401).json({
+        error: 'Refresh token expired',
+        code: 'TOKEN_EXPIRED'
+      });
+    }
+
+    if (error.message.includes('invalid')) {
+      return res.status(401).json({
+        error: 'Invalid refresh token',
+        code: 'INVALID_TOKEN'
+      });
+    }
+
+    // Generic server error
+    res.status(500).json({
+      error: 'Internal server error during token refresh',
+      code: 'REFRESH_TOKEN_ERROR'
+    });
+  }
+});
+
 export default router;

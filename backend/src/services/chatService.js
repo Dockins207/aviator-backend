@@ -20,16 +20,14 @@ async function ensureDefaultGroupChat() {
     const systemUserId = userResult.rows[0].user_id;
 
     const query = `
-      INSERT INTO group_chats (sender_id, message, status, name, description)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO group_chats (sender_id, message, name)
+      VALUES ($1, $2, $3)
       ON CONFLICT DO NOTHING
     `;
     await pool.query(query, [
       systemUserId, 
       'Welcome to the main group chat!', 
-      'sent',
-      'Main Group',
-      'Default group chat for all users'
+      'Main Group'
     ]);
   } catch (error) {
     logger.error('DEFAULT_GROUP_CHAT_CREATION_ERROR', { error: error.message });

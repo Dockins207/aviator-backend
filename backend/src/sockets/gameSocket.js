@@ -43,11 +43,8 @@ class GameSocket {
         });
       });
 
-      socket.on('disconnect', (reason) => {
-        logger.info('Socket disconnected', {
-          socketId: socket.id,
-          reason: reason
-        });
+      socket.on('disconnect', () => {
+        // No logging or actions needed
       });
     });
 

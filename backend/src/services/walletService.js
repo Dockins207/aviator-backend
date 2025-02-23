@@ -2,6 +2,7 @@ import WalletRepository from '../repositories/walletRepository.js';
 import RedisRepository from '../redis-services/redisRepository.js';
 import logger from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
+import socketManager from '../sockets/socketManager.js';
 
 // Distributed locking configuration
 const WALLET_LOCK_DURATION = 10000; // 10 seconds
@@ -22,21 +23,11 @@ class WalletService {
       });
 
       if (!lockAcquired) {
-        logger.warn('WALLET_LOCK_CONTENTION', {
-          userId,
-          lockReason,
-          message: 'Unable to acquire wallet lock'
-        });
         throw new Error('Wallet transaction in progress');
       }
 
       return { lockKey, lockValue };
     } catch (error) {
-      logger.error('WALLET_LOCK_ACQUISITION_FAILED', {
-        userId,
-        lockReason,
-        errorMessage: error.message
-      });
       throw error;
     }
   }
@@ -59,13 +50,7 @@ class WalletService {
         keys: [lockKey],
         arguments: [lockValue]
       });
-
-      logger.info('WALLET_LOCK_RELEASED', { lockKey });
     } catch (error) {
-      logger.error('WALLET_LOCK_RELEASE_FAILED', {
-        lockKey,
-        errorMessage: error.message
-      });
       throw error;
     }
   }
@@ -91,17 +76,8 @@ class WalletService {
         EX: 24 * 60 * 60 // 24 hours expiration 
       });
 
-      logger.info('WALLET_INITIALIZED', { 
-        userId, 
-        walletId 
-      });
-
       return walletResult.rows[0];
     } catch (error) {
-      logger.error('WALLET_INITIALIZATION_FAILED', { 
-        userId, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -123,9 +99,46 @@ class WalletService {
         displayBalance: `${wallet.currency} ${wallet.balance.toFixed(2)}`
       };
     } catch (error) {
-      logger.error('WALLET_RETRIEVAL_FAILED', {
+      console.error('Wallet retrieval failed', { userId });
+      throw error;
+    }
+  }
+
+  /**
+   * Get current wallet balance for a user
+   * @param {string} userId - User ID to get balance for
+   * @returns {Promise<number>} Current wallet balance
+   * @throws {Error} If wallet not found or other errors
+   */
+  async getWalletBalance(userId) {
+    try {
+      // First try to get balance from Redis cache
+      const redisClient = await RedisRepository.getClient();
+      const redisCacheKey = `wallet_balance:${userId}`;
+      const cachedBalance = await redisClient.get(redisCacheKey);
+
+      if (cachedBalance !== null) {
+        return parseFloat(cachedBalance);
+      }
+
+      // If not in cache, get from database
+      const wallet = await WalletRepository.getWalletByUserId(userId);
+      
+      if (!wallet) {
+        throw new Error('WALLET_NOT_FOUND');
+      }
+
+      // Cache the balance for future use
+      await redisClient.set(redisCacheKey, wallet.balance.toString(), {
+        EX: 60 // Cache for 1 minute
+      });
+
+      return wallet.balance;
+    } catch (error) {
+      logger.error('WALLET_BALANCE_RETRIEVAL_FAILED', {
         userId,
-        errorMessage: error.message
+        error: error.message,
+        stack: error.stack
       });
       throw error;
     }
@@ -161,25 +174,8 @@ class WalletService {
       const redisCacheKey = `wallet_balance:${userId}`;
       await redisClient.set(redisCacheKey, result.newBalance);
 
-      // Log transaction
-      logger.info('WALLET_DEPOSIT_COMPLETED', { 
-        userId, 
-        amount,
-        newBalance: result.newBalance,
-        walletId: result.walletId,
-        paymentMethod,
-        currency
-      });
-
       return result;
     } catch (error) {
-      logger.error('WALLET_DEPOSIT_FAILED', { 
-        userId, 
-        amount,
-        paymentMethod,
-        currency,
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -236,23 +232,8 @@ class WalletService {
         });
       }
 
-      // Log transaction
-      logger.info('WALLET_BET_PLACED', { 
-        userId, 
-        betAmount,
-        gameId,
-        newBalance: result.newBalance,
-        walletId: result.walletId
-      });
-
       return result;
     } catch (error) {
-      logger.error('WALLET_BET_PLACEMENT_FAILED', { 
-        userId, 
-        betAmount,
-        gameId,
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -309,23 +290,8 @@ class WalletService {
         });
       }
 
-      // Log transaction
-      logger.info('WALLET_WINNINGS_PROCESSED', { 
-        userId, 
-        winAmount,
-        gameId,
-        newBalance: result.newBalance,
-        walletId: result.walletId
-      });
-
       return result;
     } catch (error) {
-      logger.error('WALLET_WINNINGS_PROCESSING_FAILED', { 
-        userId, 
-        winAmount,
-        gameId,
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -367,20 +333,8 @@ class WalletService {
       const redisCacheKey = `wallet_balance:${userId}`;
       await redisClient.set(redisCacheKey, result.newBalance);
 
-      // Log transaction
-      logger.info('WALLET_WITHDRAWAL_COMPLETED', { 
-        userId, 
-        amount,
-        newBalance: result.newBalance
-      });
-
       return result;
     } catch (error) {
-      logger.error('WALLET_WITHDRAWAL_FAILED', { 
-        userId, 
-        amount,
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -414,12 +368,6 @@ class WalletService {
 
       return transactions;
     } catch (error) {
-      logger.error('TRANSACTION_HISTORY_RETRIEVAL_FAILED', { 
-        userId, 
-        limit,
-        offset,
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -438,10 +386,6 @@ class WalletService {
       const wallet = await WalletRepository.createWallet(userId);
       
       if (!wallet) {
-        logger.error('Wallet creation failed', { 
-          userId, 
-          errorMessage: 'Unable to create wallet' 
-        });
         throw new Error('Unable to create wallet');
       }
 
@@ -452,10 +396,6 @@ class WalletService {
 
       return wallet;
     } catch (error) {
-      logger.error('Wallet creation failed', { 
-        userId, 
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -473,36 +413,14 @@ class WalletService {
     try {
       // Validate userId
       if (!userId) {
-        logger.error('INVALID_USER_ID', { 
-          message: 'User ID is undefined or null',
-          userId
-        });
         throw new Error('Invalid User ID');
       }
 
       const redisClient = await RedisRepository.getClient();
       const redisCacheKey = `wallet_balance:${userId}`;
       
-      logger.info('BALANCE_RETRIEVAL_ATTEMPT', { 
-        userId, 
-        timestamp: new Date().toISOString() 
-      });
-
       // Verify and sync balance
       const balanceVerification = await WalletRepository.verifyAndSyncBalance(userId);
-
-      // Additional logging for balance verification
-      logger.info('BALANCE_VERIFICATION_RESULT', {
-        userId,
-        balanceVerification: {
-          walletId: balanceVerification.walletId,
-          currentBalance: balanceVerification.currentBalance,
-          calculatedBalance: balanceVerification.calculatedBalance,
-          corrected: balanceVerification.corrected,
-          difference: balanceVerification.difference,
-          reason: balanceVerification.reason
-        }
-      });
 
       // Prepare consistent response structure
       const balanceResponse = {
@@ -517,20 +435,8 @@ class WalletService {
       // Cache in Redis
       await redisClient.set(redisCacheKey, balanceResponse.balance);
 
-      logger.info('BALANCE_RETRIEVAL_SUCCESS', { 
-        userId, 
-        balance: balanceResponse.balance,
-        corrected: balanceResponse.balanceVerified
-      });
-
       return balanceResponse;
     } catch (error) {
-      logger.error('User profile balance retrieval failed', { 
-        userId, 
-        errorMessage: error.message,
-        errorStack: error.stack,
-        timestamp: new Date().toISOString()
-      });
       throw error;
     }
   }
@@ -582,11 +488,6 @@ class WalletService {
 
       return result;
     } catch (error) {
-      logger.error('Funds deposit failed', { 
-        userId, 
-        amount, 
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -629,11 +530,6 @@ class WalletService {
 
       return result;
     } catch (error) {
-      logger.error('Funds withdrawal failed', { 
-        userId, 
-        amount, 
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -690,23 +586,8 @@ class WalletService {
         });
       }
 
-      // Log transaction
-      logger.info('WALLET_CASHOUT_SUCCESS', { 
-        userId, 
-        cashoutAmount,
-        gameId,
-        newBalance: result.newBalance,
-        walletId: result.walletId
-      });
-
       return result;
     } catch (error) {
-      logger.error('WALLET_CASHOUT_FAILED', { 
-        userId, 
-        cashoutAmount,
-        gameId,
-        errorMessage: error.message 
-      });
       throw error;
     } finally {
       // Always attempt to release lock
@@ -739,19 +620,10 @@ class WalletService {
         
         if (keys.length > 0) {
           await redisClient.del(...keys);
-          
-          logger.info('REDIS_KEYS_CLEARED', {
-            userId,
-            pattern,
-            clearedKeysCount: keys.length
-          });
         }
       }
     } catch (error) {
-      logger.error('REDIS_CLEANUP_FAILED', {
-        userId,
-        errorMessage: error.message
-      });
+      throw error;
     }
   }
 
@@ -778,10 +650,7 @@ class WalletService {
       // Perform cleanup
       await this.clearOutdatedRedisEntries(userId);
     } catch (error) {
-      logger.error('REDIS_CLEANUP_SCHEDULING_FAILED', {
-        userId,
-        errorMessage: error.message
-      });
+      throw error;
     }
   }
 
@@ -789,14 +658,204 @@ class WalletService {
   async manualRedisCleanup(userId) {
     try {
       await this.clearOutdatedRedisEntries(userId);
-      logger.info('MANUAL_REDIS_CLEANUP_COMPLETED', { userId });
       return true;
     } catch (error) {
-      logger.error('MANUAL_REDIS_CLEANUP_FAILED', {
-        userId,
-        errorMessage: error.message
-      });
       return false;
+    }
+  }
+
+  async verifyUserBalance(userId) {
+    try {
+      const redisClient = await RedisRepository.getClient();
+      const redisCacheKey = `wallet_balance:${userId}`;
+      
+      // Verify and sync balance
+      const balanceVerification = await WalletRepository.verifyAndSyncBalance(userId);
+
+      // Prepare consistent response structure
+      const balanceResponse = {
+        userId,
+        walletId: balanceVerification.walletId,
+        balance: balanceVerification.currentBalance,
+        balanceVerified: balanceVerification.corrected,
+        currency: 'KSH'
+      };
+
+      // Cache in Redis
+      await redisClient.set(redisCacheKey, balanceResponse.balance);
+
+      return balanceResponse;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Get user balance for bet placement validation
+  async getUserBalance(userId) {
+    try {
+      const wallet = await this.getWallet(userId);
+      
+      if (!wallet || wallet.balance === undefined) {
+        logger.error('WALLET_BALANCE_RETRIEVAL_FAILED', {
+          userId,
+          context: 'getUserBalance'
+        });
+        throw new Error('Unable to retrieve user wallet balance');
+      }
+
+      // Validate wallet currency and balance
+      if (wallet.currency !== 'KSH') {
+        logger.warn('UNSUPPORTED_WALLET_CURRENCY', {
+          userId,
+          currency: wallet.currency,
+          context: 'getUserBalance'
+        });
+        throw new Error('Unsupported wallet currency');
+      }
+
+      if (wallet.balance < 0) {
+        logger.error('NEGATIVE_WALLET_BALANCE', {
+          userId,
+          balance: wallet.balance,
+          context: 'getUserBalance'
+        });
+        throw new Error('Invalid wallet balance');
+      }
+
+      return wallet.balance;
+    } catch (error) {
+      logger.error('USER_BALANCE_RETRIEVAL_ERROR', {
+        userId,
+        errorMessage: error.message,
+        context: 'getUserBalance'
+      });
+      throw error;
+    }
+  }
+
+  // Deduct balance from user's wallet with distributed locking
+  async deductWalletBalance(userId, amount) {
+    if (!userId || amount <= 0) {
+      throw new Error('Invalid user ID or amount for wallet deduction');
+    }
+
+    let lock = null;
+    try {
+      // Acquire distributed lock for wallet transaction
+      lock = await this.acquireWalletLock(userId, 'bet_placement');
+
+      // Fetch current wallet
+      const wallet = await WalletRepository.findWalletByUserId(userId);
+
+      if (!wallet) {
+        throw new Error(`Wallet not found for user ${userId}`);
+      }
+
+      // Check sufficient balance
+      if (wallet.balance < amount) {
+        throw new Error('Insufficient wallet balance');
+      }
+
+      // Deduct balance
+      const updatedWallet = await WalletRepository.updateWalletBalance(userId, -amount);
+
+      // Log transaction
+      logger.info('WALLET_BALANCE_DEDUCTED', {
+        userId,
+        amount,
+        newBalance: updatedWallet.balance
+      });
+
+      // Emit real-time wallet update
+      const io = socketManager.getIO();
+      if (io) {
+        const walletSocket = io.of('/wallet');
+        walletSocket.to(userId).emit('wallet:update', {
+          userId,
+          walletId: updatedWallet.id,
+          balance: updatedWallet.balance,
+          transactionType: 'deduction',
+          amount: amount,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      return updatedWallet;
+    } catch (error) {
+      logger.error('WALLET_DEDUCTION_ERROR', {
+        userId,
+        amount,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    } finally {
+      // Release the lock
+      if (lock) {
+        await this.releaseWalletLock(lock.lockKey, lock.lockValue);
+      }
+    }
+  }
+
+  // Credit balance back to user's wallet (for refunds/winnings)
+  async creditWalletBalance(userId, amount, description = 'Refund') {
+    if (!userId || amount <= 0) {
+      throw new Error('Invalid user ID or amount for wallet credit');
+    }
+
+    let lock = null;
+    try {
+      // Acquire distributed lock for wallet transaction
+      lock = await this.acquireWalletLock(userId, 'wallet_credit');
+
+      // Fetch current wallet
+      const wallet = await WalletRepository.findWalletByUserId(userId);
+
+      if (!wallet) {
+        throw new Error(`Wallet not found for user ${userId}`);
+      }
+
+      // Credit balance
+      const updatedWallet = await WalletRepository.updateWalletBalance(userId, amount);
+
+      // Log transaction
+      logger.info('WALLET_BALANCE_CREDITED', {
+        userId,
+        amount,
+        description,
+        newBalance: updatedWallet.balance
+      });
+
+      // Emit real-time wallet update
+      const io = socketManager.getIO();
+      if (io) {
+        const walletSocket = io.of('/wallet');
+        walletSocket.to(userId).emit('wallet:update', {
+          userId,
+          walletId: updatedWallet.id,
+          balance: updatedWallet.balance,
+          transactionType: 'credit',
+          amount: amount,
+          description,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      return updatedWallet;
+    } catch (error) {
+      logger.error('WALLET_CREDIT_ERROR', {
+        userId,
+        amount,
+        description,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    } finally {
+      // Release the lock
+      if (lock) {
+        await this.releaseWalletLock(lock.lockKey, lock.lockValue);
+      }
     }
   }
 }

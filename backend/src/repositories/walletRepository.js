@@ -13,16 +13,10 @@ export class WalletRepository {
   // Set the wallet socket instance
   static setWalletSocket(walletSocket) {
     if (!walletSocket) {
-      logger.warn('WALLET_SOCKET_INITIALIZATION_FAILED', {
-        message: 'Attempted to set null wallet socket'
-      });
       return;
     }
     
     this.walletSocket = walletSocket;
-    logger.info('WALLET_SOCKET_INITIALIZED', {
-      message: 'Wallet socket successfully set'
-    });
   }
 
   // Get the current wallet socket instance
@@ -35,18 +29,9 @@ export class WalletRepository {
     try {
       if (this.walletSocket && typeof this.walletSocket.emitWalletUpdate === 'function') {
         this.walletSocket.emitWalletUpdate(updateData);
-      } else {
-        logger.warn('WALLET_SOCKET_EMIT_FAILED', {
-          message: 'Cannot emit wallet update: socket not initialized',
-          updateData
-        });
       }
     } catch (error) {
-      logger.error('WALLET_SOCKET_EMIT_ERROR', {
-        message: 'Error emitting wallet update',
-        error: error.message,
-        updateData
-      });
+      throw error;
     }
   }
 
@@ -66,9 +51,6 @@ export class WalletRepository {
       const client = await pool.connect();
       return client;
     } catch (error) {
-      logger.error('DATABASE_CLIENT_ACQUISITION_FAILED', {
-        errorMessage: error.message
-      });
       throw new Error('Unable to acquire database client');
     }
   }
@@ -99,10 +81,6 @@ export class WalletRepository {
       
       return result.rows.length > 0 ? Wallet.fromRow(result.rows[0]) : null;
     } catch (error) {
-      logger.error('Error creating wallet', { 
-        walletId, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -121,13 +99,6 @@ export class WalletRepository {
         return null;
       }
 
-      // DIAGNOSTIC: Log full query result for debugging
-      logger.error('WALLET_RETRIEVAL_DIAGNOSTIC', {
-        walletId,
-        queryResult: JSON.stringify(result.rows[0]),
-        resultKeys: Object.keys(result.rows[0] || {})
-      });
-
       return {
         walletId: result.rows[0].wallet_id,
         userId: result.rows[0].user_id,
@@ -137,13 +108,6 @@ export class WalletRepository {
         updatedAt: result.rows[0].updated_at
       };
     } catch (error) {
-      // DIAGNOSTIC: Enhanced error logging
-      logger.error('WALLET_RETRIEVAL_FAILED', {
-        walletId,
-        errorMessage: error.message,
-        errorName: error.constructor.name,
-        errorStack: error.stack
-      });
       throw error;
     }
   }
@@ -177,16 +141,6 @@ export class WalletRepository {
           walletId = walletIdResult.rows[0].wallet_id;
         }
       }
-
-      // DIAGNOSTIC: Log wallet retrieval details
-      logger.error('WALLET_DEPOSIT_DIAGNOSTIC', {
-        userId,
-        walletId,
-        depositAmount,
-        description,
-        paymentMethod,
-        currency
-      });
 
       // Lock the wallet row and verify it belongs to the user
       const walletQuery = `
@@ -258,19 +212,6 @@ export class WalletRepository {
         transactionId: transactionResult.rows[0].transaction_id
       });
 
-      // Log transaction
-      logger.info('WALLET_DEPOSIT_COMPLETED', {
-        userId,
-        walletId,
-        depositAmount,
-        currentBalance,
-        newBalance,
-        transactionId: transactionResult.rows[0].transaction_id,
-        description,
-        paymentMethod,
-        currency
-      });
-
       return {
         userId,
         walletId,
@@ -281,15 +222,6 @@ export class WalletRepository {
       // Rollback transaction
       await client.query('ROLLBACK');
       
-      // Enhanced error logging
-      logger.error('WALLET_DEPOSIT_FAILED', { 
-        userId, 
-        walletId, 
-        depositAmount, 
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-
       throw error;
     } finally {
       // Release the client back to the pool
@@ -319,13 +251,6 @@ export class WalletRepository {
       // Commit transaction
       await client.query('COMMIT');
 
-      // Log transaction
-      logger.info('WALLET_WITHDRAWAL_COMPLETED', {
-        walletId,
-        withdrawAmount,
-        newBalance
-      });
-
       return {
         success: true,
         newBalance: parseFloat(newBalance)
@@ -334,13 +259,7 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
-      logger.error('WALLET_WITHDRAWAL_FAILED', {
-        walletId,
-        withdrawAmount,
-        errorMessage: error.message
-      });
-
+      
       throw error;
     } finally {
       // Release client back to pool
@@ -363,13 +282,6 @@ export class WalletRepository {
         throw new Error('INVALID_BET_AMOUNT');
       }
 
-      // Detailed logging of bet placement attempt
-      logger.info(`[${traceId}] WALLET_BET_PLACEMENT_ATTEMPT`, {
-        walletId,
-        betAmount: betAmountFloat,
-        timestamp: new Date().toISOString()
-      });
-
       // Check current balance with explicit locking
       const balanceQuery = `
         SELECT balance 
@@ -379,24 +291,12 @@ export class WalletRepository {
       `;
       const balanceResult = await client.query(balanceQuery, [walletId]);
 
-      // Detailed logging of balance check
-      if (balanceResult.rows.length === 0) {
+      // Validate wallet exists
+      if (balanceResult.rowCount === 0) {
         throw new Error('USER_WALLET_NOT_FOUND');
       }
 
       const currentBalance = parseFloat(balanceResult.rows[0].balance);
-
-      logger.info(`[${traceId}] WALLET_BALANCE_CHECK`, {
-        walletId,
-        currentBalance,
-        betAmount: betAmountFloat,
-        timestamp: new Date().toISOString()
-      });
-
-      // Validate sufficient balance
-      if (currentBalance < betAmountFloat) {
-        throw new Error('INSUFFICIENT_BALANCE');
-      }
 
       // Generate unique transaction ID
       const transactionId = uuidv4();
@@ -416,7 +316,7 @@ export class WalletRepository {
         transactionId
       ]);
 
-      // Update wallet balance with detailed logging
+      // Update wallet balance
       const updateQuery = `
         UPDATE wallets 
         SET balance = balance - $1, 
@@ -426,16 +326,6 @@ export class WalletRepository {
       `;
       const updateResult = await client.query(updateQuery, [betAmountFloat, walletId]);
       const newBalance = updateResult.rows[0].balance;
-
-      // Detailed logging of balance update
-      logger.info(`[${traceId}] WALLET_BALANCE_UPDATED`, {
-        walletId,
-        oldBalance: currentBalance,
-        betAmount: betAmountFloat,
-        newBalance,
-        transactionId,
-        timestamp: new Date().toISOString()
-      });
 
       // Commit transaction
       await client.query('COMMIT');
@@ -462,16 +352,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      
-      // Comprehensive error logging
-      logger.error(`[${traceId}] WALLET_BET_PLACEMENT_FAILED`, { 
-        walletId, 
-        amount: betAmount, 
-        errorType: error.constructor.name,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        timestamp: new Date().toISOString()
-      });
       
       throw error;
     } finally {
@@ -540,12 +420,6 @@ export class WalletRepository {
       // Rollback transaction on error
       await client.query('ROLLBACK');
       
-      logger.error('Winnings processing failed', { 
-        walletId, 
-        amount: winAmount, 
-        errorMessage: error.message 
-      });
-      
       throw error;
     } finally {
       client.release();
@@ -564,10 +438,6 @@ export class WalletRepository {
       const result = await pool.query(query, [walletId, limit, offset]);
       return result.rows.map(row => ({ ...row, currency: 'KSH' }));
     } catch (error) {
-      logger.error('Error fetching transaction history', { 
-        walletId, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -599,7 +469,6 @@ export class WalletRepository {
 
       return result.rows[0];
     } catch (error) {
-      console.error('Error adding wallet balance:', error);
       throw error;
     }
   }
@@ -632,7 +501,6 @@ export class WalletRepository {
 
       return result.rows[0];
     } catch (error) {
-      console.error('Error syncing user balance with wallet:', error);
       throw error;
     }
   }
@@ -667,7 +535,6 @@ export class WalletRepository {
 
       return result.rows;
     } catch (error) {
-      console.error('Error syncing all user balances with wallets:', error);
       throw error;
     }
   }
@@ -683,17 +550,11 @@ export class WalletRepository {
       const balanceResult = await pool.query(balanceQuery, [walletId]);
       
       if (balanceResult.rows.length === 0) {
-        logger.warn('USER_WALLET_NOT_FOUND', { walletId });
         return 0;
       }
 
       return parseFloat(balanceResult.rows[0].balance);
     } catch (error) {
-      logger.error('GET_USER_BALANCE_ERROR', {
-        walletId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
       throw error;
     }
   }
@@ -715,12 +576,6 @@ export class WalletRepository {
         throw new Error('Insufficient balance or user wallet not found');
       }
       
-      logger.info('Wallet balance deducted', { 
-        walletId, 
-        amount,
-        newBalance: result.rows[0].balance 
-      });
-
       // Broadcast wallet update if socket is initialized
       this.safeEmitWalletUpdate({
         userId: await this.getUserIdFromWalletId(walletId),
@@ -732,11 +587,6 @@ export class WalletRepository {
 
       return Wallet.fromRow(result.rows[0]);
     } catch (error) {
-      logger.error('Error deducting wallet balance', { 
-        walletId, 
-        amount, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -757,12 +607,6 @@ export class WalletRepository {
         throw new Error('User wallet not found');
       }
       
-      logger.info('Wallet balance credited', { 
-        walletId, 
-        amount,
-        newBalance: result.rows[0].balance 
-      });
-
       // Broadcast wallet update if socket is initialized
       this.safeEmitWalletUpdate({
         userId: await this.getUserIdFromWalletId(walletId),
@@ -774,11 +618,6 @@ export class WalletRepository {
 
       return Wallet.fromRow(result.rows[0]);
     } catch (error) {
-      logger.error('Error crediting wallet balance', { 
-        walletId, 
-        amount, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -803,10 +642,6 @@ export class WalletRepository {
         currency: row.currency
       }));
     } catch (error) {
-      logger.error('Error fetching all user wallets', { 
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
       throw error;
     }
   }
@@ -920,13 +755,9 @@ export class WalletRepository {
         status: 'started'
       });
       const transactionQuery = `
-        INSERT INTO wallet_transactions (
-          wallet_id, 
-          user_id,
-          transaction_type, 
-          amount, 
-          description
-        ) VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO wallet_transactions 
+        (wallet_id, user_id, transaction_type, amount, description, transaction_id, status) 
+        VALUES ($1, $2, $3, $4, $5, $6, 'completed')
         RETURNING transaction_id
       `;
       const transactionResult = await client.query(transactionQuery, [
@@ -948,9 +779,6 @@ export class WalletRepository {
       });
       await client.query('COMMIT');
       diagnosticLog.steps[6].status = 'completed';
-
-      // Log the entire diagnostic information
-      logger.info('WALLET_CREDIT_DIAGNOSTIC_SUCCESS', diagnosticLog);
 
       return {
         success: true,
@@ -975,9 +803,6 @@ export class WalletRepository {
         stack: error.stack
       };
 
-      // Log the entire diagnostic information
-      logger.error('WALLET_CREDIT_DIAGNOSTIC_FAILURE', diagnosticLog);
-
       throw error;
     } finally {
       // Release client back to pool
@@ -1000,12 +825,6 @@ export class WalletRepository {
         metadata
       );
     } catch (error) {
-      logger.error('WALLET_CREDIT_FALLBACK_ERROR', {
-        walletId,
-        amount,
-        description,
-        errorMessage: error.message
-      });
       throw error;
     }
   }
@@ -1031,16 +850,6 @@ export class WalletRepository {
         throw new Error('INVALID_CREDIT_AMOUNT');
       }
 
-      // Detailed logging of credit attempt
-      logger.info(`[${traceId}] WALLET_CREDIT_ATTEMPT`, {
-        walletId,
-        amount: creditAmount,
-        description,
-        gameId,
-        timestamp: new Date().toISOString(),
-        metadata: JSON.stringify(metadata)
-      });
-
       // Check wallet existence with explicit locking
       const walletQuery = `
         SELECT wallet_id, user_id, balance 
@@ -1058,15 +867,6 @@ export class WalletRepository {
       const wallet = walletResult.rows[0];
       const currentBalance = parseFloat(wallet.balance);
       const userId = wallet.user_id;
-
-      // Log balance before credit
-      logger.info(`[${traceId}] WALLET_BALANCE_BEFORE_CREDIT`, {
-        walletId,
-        userId,
-        currentBalance,
-        creditAmount,
-        timestamp: new Date().toISOString()
-      });
 
       // Generate unique transaction ID
       const transactionId = uuidv4();
@@ -1099,18 +899,6 @@ export class WalletRepository {
       const updateResult = await client.query(updateQuery, [creditAmount, walletId]);
       const newBalance = updateResult.rows[0].balance;
 
-      // Detailed logging of balance update
-      logger.info(`[${traceId}] WALLET_BALANCE_UPDATED`, {
-        walletId,
-        userId,
-        oldBalance: currentBalance,
-        creditAmount,
-        newBalance,
-        transactionId,
-        gameId,
-        timestamp: new Date().toISOString()
-      });
-
       // Commit transaction
       await client.query('COMMIT');
 
@@ -1136,18 +924,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      
-      // Comprehensive error logging
-      logger.error(`[${traceId}] WALLET_CREDIT_FAILED`, { 
-        walletId, 
-        amount: amount, 
-        description,
-        gameId,
-        errorType: error.constructor.name,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        timestamp: new Date().toISOString()
-      });
       
       throw error;
     } finally {
@@ -1207,15 +983,6 @@ export class WalletRepository {
       // Commit transaction
       await client.query('COMMIT');
 
-      // Log transaction details
-      logger.info('WALLET_TRANSACTION_RECORDED', {
-        walletId,
-        transactionType,
-        amount,
-        newBalance,
-        transactionId: transactionResult.rows[0].transaction_id
-      });
-
       return {
         id: transactionResult.rows[0].transaction_id,
         walletId,
@@ -1225,13 +992,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
-      logger.error('WALLET_TRANSACTION_RECORD_FAILED', {
-        walletId,
-        transactionType,
-        amount,
-        errorMessage: error.message
-      });
 
       throw error;
     } finally {
@@ -1307,14 +1067,6 @@ export class WalletRepository {
       // Commit transaction
       await client.query('COMMIT');
 
-      // Log transaction details
-      logger.info('WALLET_DEBIT_COMPLETED', {
-        walletId,
-        amount,
-        newBalance,
-        transactionId: transactionResult.rows[0].transaction_id
-      });
-
       return {
         success: true,
         newBalance,
@@ -1324,12 +1076,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
-      logger.error('WALLET_DEBIT_FAILED', {
-        walletId,
-        amount,
-        errorMessage: error.message
-      });
 
       throw error;
     } finally {
@@ -1400,14 +1146,6 @@ export class WalletRepository {
       // Commit transaction
       await client.query('COMMIT');
 
-      // Log transaction details
-      logger.info('WALLET_CREDIT_COMPLETED', {
-        walletId,
-        amount,
-        newBalance,
-        transactionId: transactionResult.rows[0].transaction_id
-      });
-
       return {
         success: true,
         newBalance,
@@ -1417,12 +1155,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
-      logger.error('WALLET_CREDIT_FAILED', {
-        walletId,
-        amount,
-        errorMessage: error.message
-      });
 
       throw error;
     } finally {
@@ -1446,13 +1178,6 @@ export class WalletRepository {
         timestamp: new Date().toISOString()
       };
 
-      // Log detailed information before publishing
-      logger.info('WALLET_BALANCE_BROADCAST_PREPARATION', {
-        userId,
-        payload: JSON.stringify(payload),
-        pubClientAvailable: !!pubClient
-      });
-
       // Publish to two channels:
       // 1. User-specific channel
       // 2. Global wallet updates channel
@@ -1463,22 +1188,8 @@ export class WalletRepository {
       const userPublishResult = await pubClient.publish(userChannel, JSON.stringify(payload));
       const globalPublishResult = await pubClient.publish(globalChannel, JSON.stringify(payload));
 
-      logger.info('WALLET_BALANCE_BROADCAST', {
-        userId,
-        userChannelPublishResult: userPublishResult,
-        globalChannelPublishResult: globalPublishResult,
-        balanceChange: payload.newBalance - payload.previousBalance,
-        transactionType: payload.transactionType
-      });
-
       return payload;
     } catch (error) {
-      logger.error('WALLET_BROADCAST_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        balanceUpdate: JSON.stringify(balanceUpdate)
-      });
       throw error;
     }
   }
@@ -1490,21 +1201,11 @@ export class WalletRepository {
       const subClient = redisConnection.getSubClient();
       const pubClient = redisConnection.getPubClient();
 
-      // Log subscription setup details
-      logger.info('WALLET_BALANCE_SUBSCRIPTION_SETUP', {
-        subClientAvailable: !!subClient,
-        pubClientAvailable: !!pubClient,
-        ioNamespaceAvailable: !!io
-      });
-
       // Create wallet namespace explicitly
       const walletNamespace = io.of('/wallet');
 
       // Ensure namespace is ready
       walletNamespace.on('connection', (socket) => {
-        logger.info('WALLET_SOCKET_CONNECTED', {
-          socketId: socket.id
-        });
       });
 
       // Subscribe to global wallet updates channel
@@ -1518,37 +1219,18 @@ export class WalletRepository {
           try {
             walletUpdate = JSON.parse(messageStr);
           } catch (parseError) {
-            logger.error('WALLET_BALANCE_MESSAGE_PARSE_ERROR', {
-              channel,
-              message: messageStr,
-              errorMessage: parseError.message
-            });
             return;
           }
 
           // Validate wallet update structure
           if (!walletUpdate || !walletUpdate.userId) {
-            logger.warn('INVALID_WALLET_UPDATE', {
-              channel,
-              update: walletUpdate
-            });
             return;
           }
 
           // Broadcast to all connected clients in wallet namespace
           walletNamespace.emit('wallet:balance:update', walletUpdate);
-
-          logger.info('WALLET_BALANCE_UPDATE_EMITTED', {
-            channel,
-            userId: walletUpdate.userId,
-            balance: walletUpdate.balance,
-            namespaceClients: walletNamespace.sockets.size
-          });
         } catch (error) {
-          logger.error('WALLET_BALANCE_UPDATE_HANDLER_ERROR', {
-            errorMessage: error.message,
-            errorStack: error.stack
-          });
+          throw error;
         }
       });
 
@@ -1567,55 +1249,27 @@ export class WalletRepository {
             try {
               walletUpdate = JSON.parse(messageStr);
             } catch (parseError) {
-              logger.error('USER_WALLET_BALANCE_MESSAGE_PARSE_ERROR', {
-                channel,
-                message: messageStr,
-                errorMessage: parseError.message
-              });
               return;
             }
 
             // Validate wallet update structure
             if (!walletUpdate || !walletUpdate.userId) {
-              logger.warn('INVALID_USER_WALLET_UPDATE', {
-                channel,
-                update: walletUpdate
-              });
               return;
             }
 
             // Broadcast to wallet namespace
             walletNamespace.emit('wallet:balance:update', walletUpdate);
-
-            logger.info('USER_WALLET_BALANCE_UPDATE_EMITTED', {
-              channel,
-              userId: walletUpdate.userId,
-              balance: walletUpdate.balance
-            });
           } catch (error) {
-            logger.error('USER_WALLET_BALANCE_UPDATE_HANDLER_ERROR', {
-              errorMessage: error.message,
-              errorStack: error.stack
-            });
+            throw error;
           }
         });
-
-        logger.info('USER_SPECIFIC_WALLET_CHANNEL_SUBSCRIBED', {
-          userId,
-          userChannel
-        });
       };
-
-      logger.info('WALLET_BALANCE_SUBSCRIPTION_SETUP_COMPLETE');
     } catch (error) {
-      logger.error('WALLET_BALANCE_SUBSCRIPTION_ERROR', {
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
+      throw error;
     }
   }
 
-  // Record wallet transaction with real-time broadcasting
+  // Record a wallet transaction with real-time broadcasting
   static async recordTransaction(userId, transactionType, amount, metadata = {}) {
     const client = await this.getPoolClient();
 
@@ -1689,13 +1343,6 @@ export class WalletRepository {
       // Rollback transaction
       await client.query('ROLLBACK');
 
-      logger.error('WALLET_TRANSACTION_ERROR', {
-        userId,
-        transactionType,
-        amount,
-        errorMessage: error.message
-      });
-
       throw error;
     } finally {
       // Release client
@@ -1718,10 +1365,6 @@ export class WalletRepository {
 
       return result.rows[0].user_id;
     } catch (error) {
-      logger.error('Error getting user ID from wallet ID', { 
-        walletId, 
-        errorMessage: error.message 
-      });
       throw error;
     }
   }
@@ -1735,33 +1378,16 @@ export class WalletRepository {
         WHERE user_id = $1
       `;
       
-      logger.info('GET_WALLET_ID_BY_USER_ID_ATTEMPT', {
-        userId
-      });
-
       const result = await pool.query(query, [userId]);
 
       if (result.rowCount === 0) {
-        logger.error('GET_WALLET_ID_NO_WALLET_FOUND', {
-          userId
-        });
         throw new Error(`No wallet found for user ID: ${userId}`);
       }
 
       const walletId = result.rows[0].wallet_id;
 
-      logger.info('GET_WALLET_ID_SUCCESS', {
-        userId,
-        walletId
-      });
-
       return walletId;
     } catch (error) {
-      logger.error('GET_WALLET_ID_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
       throw error;
     }
   }
@@ -1779,21 +1405,10 @@ export class WalletRepository {
       const result = await client.query(query, [userId]);
 
       if (result.rows.length === 0) {
-        logger.warn('WALLET_NOT_FOUND_FOR_USER', {
-          userId,
-          message: 'No wallet found for the given user'
-        });
         return null;
       }
 
       const wallet = result.rows[0];
-
-      // Log wallet retrieval for debugging
-      logger.info('WALLET_RETRIEVED_BY_USER_ID', {
-        userId,
-        walletId: wallet.wallet_id,
-        balance: wallet.balance
-      });
 
       return {
         walletId: wallet.wallet_id,
@@ -1804,11 +1419,6 @@ export class WalletRepository {
         updatedAt: wallet.updated_at
       };
     } catch (error) {
-      logger.error('WALLET_RETRIEVAL_BY_USER_ID_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
       throw error;
     } finally {
       client.release();
@@ -1824,19 +1434,11 @@ export class WalletRepository {
       const result = await client.query(query, [userId]);
 
       if (result.rows.length === 0) {
-        logger.warn('WALLET_ID_NOT_FOUND_FOR_USER', {
-          userId,
-          message: 'No wallet ID found for the given user'
-        });
         return null;
       }
 
       return result.rows[0].wallet_id;
     } catch (error) {
-      logger.error('WALLET_ID_RETRIEVAL_ERROR', {
-        userId,
-        errorMessage: error.message
-      });
       throw error;
     } finally {
       client.release();
@@ -1854,17 +1456,8 @@ export class WalletRepository {
 
       // Subscribe to user-specific channel
       subClient.subscribe(userChannel);
-
-      logger.info('USER_SPECIFIC_WALLET_CHANNEL_SUBSCRIBED', {
-        userId,
-        userChannel
-      });
     } catch (error) {
-      logger.error('USER_WALLET_CHANNEL_SUBSCRIPTION_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
+      throw error;
     }
   }
 
@@ -1931,18 +1524,11 @@ export class WalletRepository {
       
       // Add defensive check for empty transaction result
       if (!transactionResult.rows || transactionResult.rows.length === 0) {
-        logger.warn('NO_TRANSACTION_HISTORY_FOUND', {
-          userId,
-          walletId
-        });
-
         // If no transaction history, use current wallet balance
         const walletQuery = 'SELECT balance FROM wallets WHERE user_id = $1';
         const walletResult = await client.query(walletQuery, [userId]);
 
         if (!walletResult.rows || walletResult.rows.length === 0) {
-          logger.error('NO_WALLET_FOUND', { userId });
-          
           // Create a new wallet if none exists
           const createWalletQuery = `
             INSERT INTO wallets (user_id, balance, created_at, updated_at) 
@@ -1977,34 +1563,11 @@ export class WalletRepository {
       const transactionBreakdown = transactionResult.rows[0].transaction_breakdown || [];
       const totalTransactionCount = parseInt(transactionResult.rows[0].total_transaction_count || '0');
 
-      // Log extremely detailed balance verification information
-      logger.error('BALANCE_VERIFICATION_DETAILED_LOG', {
-        userId,
-        walletId,
-        currentBalance,
-        initialBalance,
-        transactionTotal,
-        calculatedBalance,
-        transactionBreakdown,
-        totalTransactionCount,
-        walletCreatedAt
-      });
-
       // Determine if balance needs correction
       const balanceDifference = Math.abs(currentBalance - calculatedBalance);
       const BALANCE_TOLERANCE = 0.01; // Allow small floating-point discrepancies
 
       if (balanceDifference > BALANCE_TOLERANCE || calculatedBalance < 0) {
-        // Log significant discrepancy
-        logger.warn('BALANCE_DISCREPANCY_DETECTED', {
-          userId,
-          walletId,
-          currentBalance,
-          calculatedBalance,
-          difference: balanceDifference,
-          transactionBreakdown
-        });
-
         // Update wallet balance with ZERO if calculated balance is negative
         const updateQuery = `
           UPDATE wallets 
@@ -2049,12 +1612,6 @@ export class WalletRepository {
     } catch (error) {
       // Rollback transaction
       await client.query('ROLLBACK');
-
-      logger.error('BALANCE_VERIFICATION_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
 
       throw error;
     } finally {
@@ -2126,18 +1683,11 @@ export class WalletRepository {
       
       // Add defensive check for empty transaction result
       if (!transactionResult.rows || transactionResult.rows.length === 0) {
-        logger.warn('NO_TRANSACTION_HISTORY_FOUND', {
-          userId,
-          walletId
-        });
-
         // If no transaction history, use current wallet balance
         const walletQuery = 'SELECT balance FROM wallets WHERE user_id = $1';
         const walletResult = await client.query(walletQuery, [userId]);
 
         if (!walletResult.rows || walletResult.rows.length === 0) {
-          logger.error('NO_WALLET_FOUND', { userId });
-          
           // Create a new wallet if none exists
           const createWalletQuery = `
             INSERT INTO wallets (user_id, balance, created_at, updated_at) 
@@ -2172,34 +1722,11 @@ export class WalletRepository {
       const transactionBreakdown = transactionResult.rows[0].transaction_breakdown || [];
       const totalTransactionCount = parseInt(transactionResult.rows[0].total_transaction_count || '0');
 
-      // Log extremely detailed balance verification information
-      logger.error('BALANCE_VERIFICATION_DETAILED_LOG', {
-        userId,
-        walletId,
-        currentBalance,
-        initialBalance,
-        transactionTotal,
-        calculatedBalance,
-        transactionBreakdown,
-        totalTransactionCount,
-        walletCreatedAt
-      });
-
       // Determine if balance needs correction
       const balanceDifference = Math.abs(currentBalance - calculatedBalance);
       const BALANCE_TOLERANCE = 0.01; // Allow small floating-point discrepancies
 
       if (balanceDifference > BALANCE_TOLERANCE || calculatedBalance < 0) {
-        // Log significant discrepancy
-        logger.warn('BALANCE_DISCREPANCY_DETECTED', {
-          userId,
-          walletId,
-          currentBalance,
-          calculatedBalance,
-          difference: balanceDifference,
-          transactionBreakdown
-        });
-
         // Update wallet balance with ZERO if calculated balance is negative
         const updateQuery = `
           UPDATE wallets 
@@ -2245,12 +1772,6 @@ export class WalletRepository {
       // Rollback transaction
       await client.query('ROLLBACK');
 
-      logger.error('BALANCE_VERIFICATION_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-
       throw error;
     } finally {
       // Release client
@@ -2258,9 +1779,227 @@ export class WalletRepository {
     }
   }
 
-  // Get the current wallet socket instance
-  static getWalletSocket() {
-    return this.walletSocket;
+  // Find wallet by user ID
+  static async findWalletByUserId(userId) {
+    const client = await pool.connect();
+    try {
+      const query = `
+        SELECT * FROM wallets 
+        WHERE user_id = $1
+      `;
+      const result = await client.query(query, [userId]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+      
+      return result.rows[0];
+    } catch (error) {
+      logger.error('FIND_WALLET_ERROR', {
+        userId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Update wallet balance
+  static async updateWalletBalance(userId, balanceChange) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // First get current wallet to check balance
+      const currentWalletQuery = 'SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE';
+      const currentWalletResult = await client.query(currentWalletQuery, [userId]);
+
+      if (currentWalletResult.rows.length === 0) {
+        throw new Error('Wallet not found');
+      }
+
+      const currentWallet = currentWalletResult.rows[0];
+      const newBalance = parseFloat(currentWallet.balance) + parseFloat(balanceChange);
+
+      if (newBalance < 0) {
+        await client.query('ROLLBACK');
+        throw new Error('Insufficient balance');
+      }
+
+      // Update the balance
+      const updateQuery = `
+        UPDATE wallets 
+        SET balance = $1, 
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE wallet_id = $2 
+        RETURNING *
+      `;
+      const updateResult = await client.query(updateQuery, [newBalance, currentWallet.wallet_id]);
+
+      if (updateResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        throw new Error('Failed to update wallet balance');
+      }
+
+      // Record the transaction
+      const transactionQuery = `
+        INSERT INTO wallet_transactions (
+          wallet_id, 
+          user_id, 
+          transaction_type, 
+          amount, 
+          description, 
+          status
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+      `;
+      await client.query(transactionQuery, [
+        currentWallet.wallet_id,
+        userId,
+        balanceChange < 0 ? 'bet' : 'win',
+        Math.abs(balanceChange),
+        balanceChange < 0 ? 'Bet placement' : 'Game win',
+        'completed'
+      ]);
+
+      // Log the successful transaction
+      logger.info('WALLET_BALANCE_UPDATED', {
+        userId,
+        walletId: currentWallet.wallet_id,
+        previousBalance: currentWallet.balance,
+        balanceChange,
+        newBalance,
+        transactionType: balanceChange < 0 ? 'bet' : 'win'
+      });
+
+      await client.query('COMMIT');
+
+      // Return the updated wallet
+      return updateResult.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('WALLET_BALANCE_UPDATE_ERROR', {
+        userId,
+        balanceChange,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async getUserIdFromWalletId(walletId) {
+    try {
+      const query = `
+        SELECT user_id 
+        FROM wallets 
+        WHERE wallet_id = $1
+      `;
+      const result = await pool.query(query, [walletId]);
+
+      if (result.rows.length === 0) {
+        throw new Error('Wallet not found');
+      }
+
+      return result.rows[0].user_id;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Get wallet ID for a specific user
+  static async getWalletIdByUserId(userId) {
+    try {
+      const query = `
+        SELECT wallet_id 
+        FROM wallets 
+        WHERE user_id = $1
+      `;
+      
+      const result = await pool.query(query, [userId]);
+
+      if (result.rowCount === 0) {
+        throw new Error(`No wallet found for user ID: ${userId}`);
+      }
+
+      const walletId = result.rows[0].wallet_id;
+
+      return walletId;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Get wallet details by user ID
+  static async getWalletByUserId(userId) {
+    const client = await this.getPoolClient();
+
+    try {
+      const query = `
+        SELECT wallet_id, balance, currency, created_at, updated_at
+        FROM wallets
+        WHERE user_id = $1
+      `;
+      const result = await client.query(query, [userId]);
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const wallet = result.rows[0];
+
+      return {
+        walletId: wallet.wallet_id,
+        userId: userId,
+        balance: parseFloat(wallet.balance),
+        currency: wallet.currency,
+        createdAt: wallet.created_at,
+        updatedAt: wallet.updated_at
+      };
+    } catch (error) {
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get wallet ID for a specific user
+  static async getWalletIdByUserId(userId) {
+    const client = await this.getPoolClient();
+
+    try {
+      const query = 'SELECT wallet_id FROM wallets WHERE user_id = $1';
+      const result = await client.query(query, [userId]);
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      return result.rows[0].wallet_id;
+    } catch (error) {
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Method to dynamically subscribe to user-specific updates
+  static subscribeToUserWalletUpdates(userId) {
+    try {
+      // Get Redis subscription client
+      const subClient = redisConnection.getSubClient();
+
+      // User-specific channel
+      const userChannel = `wallet:balance:${userId}`;
+
+      // Subscribe to user-specific channel
+      subClient.subscribe(userChannel);
+    } catch (error) {
+      throw error;
+    }
   }
 }
 

@@ -8,64 +8,90 @@ const authenticatedSockets = new Set();
 
 export default async function socketAuthMiddleware(socket, next) {
   try {
-    // Enhanced token extraction
-    const token = 
-      socket.handshake.auth.token || 
-      socket.handshake.auth.accessToken || 
-      socket.handshake.headers.authorization?.split(' ')[1] ||
-      socket.handshake.headers['x-access-token'] ||
-      socket.handshake.query.token;
+    // ABSOLUTE Token Extraction Strategy 
+    const extractToken = () => {
+      const extractionStrategies = [
+        () => socket.handshake.auth.token,
+        () => socket.handshake.auth.accessToken,
+        () => socket.handshake.headers.authorization?.split(' ')[1],
+        () => socket.handshake.headers['x-access-token'],
+        () => socket.handshake.query.token
+      ];
 
+      for (const [index, strategy] of extractionStrategies.entries()) {
+        const token = strategy();
+        if (token) {
+          return token;
+        }
+      }
+
+      return null;
+    };
+
+    const token = extractToken();
+
+    // STRICT Token Validation
     if (!token) {
-      logger.error('Socket Authentication Error: No token provided', {
-        authObject: socket.handshake.auth,
-        headers: socket.handshake.headers,
-        query: socket.handshake.query,
-        socketId: socket.id
-      });
-      return next(new Error('Authentication error: No token provided'));
+      return next(new Error('SECURITY_VIOLATION_NO_TOKEN'));
     }
 
     try {
-      // Verify the token
+      // COMPREHENSIVE Token Verification
       const decoded = jwt.verify(token, JWT_SECRET);
 
-      // Attach decoded user to socket
+      // STRICT Decoded Payload Validation
+      const REQUIRED_PAYLOAD_FIELDS = [
+        'user_id', 
+        'username'
+      ];
+
+      const OPTIONAL_PAYLOAD_FIELDS = [
+        'roles',
+        'role',
+        'is_active'
+      ];
+
+      // Check required fields
+      const missingFields = REQUIRED_PAYLOAD_FIELDS.filter(field => !decoded[field]);
+      if (missingFields.length > 0) {
+        return next(new Error(`SECURITY_VIOLATION_MISSING_FIELDS: ${missingFields.join(', ')}`));
+      }
+
+      // Normalize roles
+      const roles = decoded.roles || 
+                    (decoded.role ? [decoded.role] : ['user']);
+
+      // CONSISTENT User Object Creation with Strict Mapping
       socket.user = {
-        id: decoded.id || decoded.user_id || socket.handshake.auth.userId,
-        username: decoded.username || socket.handshake.auth.username
+        user_id: decoded.user_id,  // Consistent user_id
+        username: decoded.username,
+        email: decoded.email,
+        roles: roles,
+        is_active: decoded.is_active || false,
+        authSource: 'socket_jwt',
+        authTimestamp: new Date().toISOString()
       };
 
-      // Create a unique key for this authentication event
-      const authKey = `${socket.user.id}-${socket.id}`;
-
-      // Log authentication only if not already logged
-      if (!authenticatedSockets.has(authKey)) {
-        logger.info('SOCKET_AUTHENTICATION', { 
-          userId: socket.user.id, 
-          socketId: socket.id 
-        });
-        authenticatedSockets.add(authKey);
-      }
-
       next();
-    } catch (error) {
-      logger.error('Socket Authentication Error', { 
-        error: error.message,
-        errorName: error.name,
-        token: token.substring(0, 10) + '...' // Partial token for debugging
-      });
-      if (error.name === 'TokenExpiredError') {
-        return next(new Error('Authentication error: Token expired'));
-      }
+    } catch (tokenVerificationError) {
+      // COMPREHENSIVE Token Error Handling
+      const errorHandlers = {
+        'TokenExpiredError': () => {
+          return new Error('SECURITY_VIOLATION_TOKEN_EXPIRED');
+        },
+        'JsonWebTokenError': () => {
+          return new Error('SECURITY_VIOLATION_INVALID_TOKEN');
+        },
+        'default': () => {
+          return new Error('SECURITY_VIOLATION_UNEXPECTED_TOKEN_ERROR');
+        }
+      };
 
-      return next(new Error('Authentication error: Invalid token'));
+      const errorHandler = errorHandlers[tokenVerificationError.name] || errorHandlers['default'];
+      return next(errorHandler());
     }
-  } catch (error) {
-    logger.error('Unexpected Socket Authentication Error', { 
-      errorMessage: error.message,
-      socketId: socket.id
-    });
-    return next(new Error('Unexpected authentication error'));
+  } catch (unexpectedError) {
+    // LAST RESORT Error Handling
+    return next(new Error('SECURITY_VIOLATION_UNEXPECTED_AUTH_ERROR'));
   }
 }

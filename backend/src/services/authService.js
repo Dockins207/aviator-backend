@@ -495,25 +495,62 @@ export const authService = {
         {
           user_id: user.user_id,
           username: user.username,
-          role: user.role,
-          phone_number: user.phone_number
+          role: user.role || 'user',  // Default role if not specified
+          roles: user.roles || ['user'],  // Add roles array
+          phone_number: user.phone_number,
+          is_active: user.is_active || false
         },
         process.env.JWT_SECRET || 'your_jwt_secret_here', 
         { expiresIn: '7d' }
       );
 
       // Optional: Still store token details in Redis for additional tracking
-      const redisClient = await redisRepository.getClient();
-      const userTokenKey = `user_token:${user.user_id}`;
-      await redisClient.set(
-        userTokenKey, 
-        JSON.stringify({
-          token,
-          lastLogin: new Date().toISOString()
-        }),
-        'EX', // Set expiration
-        7 * 24 * 60 * 60 // 7 days in seconds
-      );
+      try {
+        const redisClient = await redisRepository.ensureClientReady();
+        const userTokenKey = `user_token:${user.user_id}`;
+        
+        // Comprehensive token storage with enhanced error handling
+        await redisClient.set(
+          userTokenKey, 
+          JSON.stringify({
+            token,
+            userId: user.user_id,
+            username: user.username,
+            lastLogin: new Date().toISOString(),
+            loginTraceId: traceId
+          }),
+          {
+            EX: 7 * 24 * 60 * 60, // 7 days in seconds
+            NX: true  // Only set if key does not exist
+          }
+        );
+
+        // Optional: Add a secondary tracking mechanism
+        await redisClient.sAdd('active_user_tokens', userTokenKey);
+      } catch (redisError) {
+        logger.error(`[${traceId}] CRITICAL_REDIS_TOKEN_STORAGE_ERROR`, {
+          reason: redisError.message,
+          errorCode: redisError.code,
+          errorStack: redisError.stack,
+          context: 'login_token_storage',
+          userId: user.user_id,
+          timestamp: new Date().toISOString()
+        });
+
+        // More aggressive error handling
+        if (redisError.code === 'CONNECTION_CLOSED' || 
+            redisError.code === 'CONNECTION_REFUSED') {
+          // Attempt to reconnect or reinitialize Redis
+          try {
+            await redisRepository.initializeClient();
+          } catch (reInitError) {
+            logger.error('REDIS_REINITIALIZATION_FAILED', {
+              errorMessage: reInitError.message,
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
+      }
 
       logger.info(`[${traceId}] User JWT token generated`, {
         userId: user.user_id
@@ -647,6 +684,12 @@ export const authService = {
       
       const userProfile = result.rows[0];
       
+      // Debug log for username
+      console.log('Retrieved User Profile:', {
+        userId,
+        username: userProfile.username
+      });
+
       // Fetch wallet balance
       const walletQuery = `
         SELECT balance, currency 
@@ -875,6 +918,164 @@ export const authService = {
       client.release();
     }
   },
+
+  async storeRefreshToken(userId, refreshToken, tokenSalt) {
+    const client = await pool.connect();
+    try {
+      // Hash the refresh token before storage for additional security
+      const hashedToken = crypto.createHash('sha256')
+        .update(refreshToken + tokenSalt)
+        .digest('hex');
+
+      await client.query(
+        `INSERT INTO user_refresh_tokens 
+        (user_id, token, token_salt, created_at, expires_at, is_revoked) 
+        VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '7 days', FALSE) 
+        ON CONFLICT (user_id) DO UPDATE 
+        SET 
+          token = $2, 
+          token_salt = $3,
+          created_at = NOW(),
+          expires_at = NOW() + INTERVAL '7 days',
+          is_revoked = FALSE`,
+        [userId, hashedToken, tokenSalt]
+      );
+
+      logger.info('REFRESH_TOKEN_STORED', {
+        userId,
+        tokenStored: true
+      });
+    } catch (error) {
+      logger.error('REFRESH_TOKEN_STORAGE_CRITICAL_FAILURE', {
+        userId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw new Error('Critical failure in refresh token storage');
+    } finally {
+      client.release();
+    }
+  },
+
+  async refreshAccessToken(refreshToken) {
+    try {
+      // Comprehensive token verification
+      const decoded = jwt.verify(
+        refreshToken, 
+        process.env.REFRESH_TOKEN_SECRET || 'your_refresh_token_secret'
+      );
+
+      // Validate token type and structure
+      if (decoded.type !== 'refresh' || !decoded.userId) {
+        logger.error('INVALID_REFRESH_TOKEN_STRUCTURE', {
+          tokenType: decoded.type,
+          hasUserId: !!decoded.userId
+        });
+        throw new Error('Invalid refresh token structure');
+      }
+
+      // Check token in database
+      const client = await pool.connect();
+      try {
+        const hashedToken = crypto.createHash('sha256')
+          .update(refreshToken + (decoded.salt || ''))
+          .digest('hex');
+
+        const tokenCheck = await client.query(
+          `SELECT * FROM user_refresh_tokens 
+           WHERE user_id = $1 AND token = $2 AND is_revoked = FALSE AND expires_at > NOW()`,
+          [decoded.userId, hashedToken]
+        );
+
+        if (tokenCheck.rows.length === 0) {
+          logger.error('REFRESH_TOKEN_INVALID_OR_REVOKED', {
+            userId: decoded.userId
+          });
+          throw new Error('Refresh token is invalid or has been revoked');
+        }
+
+        // Retrieve user profile
+        const userProfile = await this.getUserProfile(decoded.userId);
+
+        if (!userProfile) {
+          throw new Error('User not found');
+        }
+
+        // Generate new access token
+        const accessToken = jwt.sign(
+          {
+            user_id: userProfile.user_id,
+            username: userProfile.username,
+            roles: userProfile.roles || ['user']
+          },
+          process.env.JWT_SECRET || 'your_jwt_secret',
+          { 
+            expiresIn: '15m' 
+          }
+        );
+
+        // Generate new refresh token
+        const newRefreshToken = await this.generateRefreshToken(userProfile.user_id);
+
+        logger.info('ACCESS_TOKEN_REFRESHED', {
+          userId: userProfile.user_id,
+          username: userProfile.username
+        });
+
+        return {
+          accessToken,
+          refreshToken: newRefreshToken,
+          user: {
+            user_id: userProfile.user_id,
+            username: userProfile.username
+          }
+        };
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      logger.error('ACCESS_TOKEN_REFRESH_CRITICAL_FAILURE', {
+        errorMessage: error.message,
+        errorName: error.name,
+        errorStack: error.stack
+      });
+
+      // Specific error handling
+      if (error.name === 'TokenExpiredError') {
+        throw new Error('Refresh token expired. Please login again.');
+      }
+
+      if (error.name === 'JsonWebTokenError') {
+        throw new Error('Invalid refresh token. Please login again.');
+      }
+
+      throw error;
+    }
+  },
+
+  async revokeRefreshToken(userId) {
+    const client = await pool.connect();
+    try {
+      await client.query(
+        'UPDATE user_refresh_tokens SET is_revoked = TRUE WHERE user_id = $1',
+        [userId]
+      );
+      
+      logger.info('REFRESH_TOKEN_REVOKED', { 
+        userId,
+        revocationMethod: 'mark_revoked'
+      });
+    } catch (error) {
+      logger.error('REFRESH_TOKEN_REVOCATION_CRITICAL_FAILURE', {
+        userId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw new Error('Critical failure in refresh token revocation');
+    } finally {
+      client.release();
+    }
+  }
 };
 
 export { balanceService };

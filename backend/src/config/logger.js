@@ -193,7 +193,7 @@ const fileTransport = new winston.transports.DailyRotateFile({
 });
 
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: process.env.LOG_LEVEL || 'debug', // Change to debug
   format: winston.format.combine(
     logFilter(),
     winston.format.json()
@@ -242,10 +242,9 @@ logger.redisError = (message, metadata = {}) => {
   logger.error(`[REDIS] ${message}`, metadata);
 };
 
-// Game-specific logging (minimal)
+// Game-specific logging
 logger.gameInfo = (message, metadata = {}) => {
-  // Use standard info level, but don't log anything
-  return;
+  logger.info(`[GAME] ${message}`, metadata);
 };
 
 logger.gameError = (message, metadata = {}) => {

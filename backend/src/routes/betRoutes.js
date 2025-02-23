@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/authMiddleware.js';
 import GameRepository from '../repositories/gameRepository.js';
 import redisRepository from '../redis-services/redisRepository.js';
 import statsService from '../services/statsService.js';
+import gameService from '../services/gameService.js';
 
 const router = express.Router();
 
@@ -38,7 +39,7 @@ router.use(betRequestLogger);
 router.use(betRequestDetailsLogger);
 
 // Place a bet - requires authentication
-router.post('/place', 
+router.post('/place-bet', 
   authMiddleware.authenticateToken, 
   async (req, res) => {
     try {
@@ -47,35 +48,29 @@ router.post('/place',
         req.user = req.auth;
       }
 
-      const { amount } = req.body;
-      const userId = req.user ? req.user.user_id || req.user.userId : null;
+      const { amount, userId, cashoutMultiplier } = req.body;
+      const authenticatedUserId = req.user ? req.user.user_id || req.user.userId : null;
 
-      // Log received request details with explicit user object check
-      logger.info('[BET_PLACEMENT_REQUEST]', {
-        amount,
-        decodedUser: JSON.stringify(req.user || {}),
-        userId: userId
-      });
-
-      // Comprehensive input validation with detailed logging
-      if (amount === undefined || amount === null) {
-        logger.error('[BET_PLACEMENT_ERROR] Missing bet amount', {
-          receivedBody: JSON.stringify(req.body),
-          expectedFields: ['amount']
-        });
-        return res.status(400).json({
+      // Validate user ID
+      if (!authenticatedUserId) {
+        return res.status(401).json({
           success: false,
-          message: 'Bet amount is required',
-          details: 'Amount field must be provided'
+          message: 'Unauthorized: Invalid user context'
         });
       }
 
-      // Convert amount to number and validate
-      const betAmount = Number(amount);
-      if (isNaN(betAmount) || betAmount <= 0) {
+      // Validate user ID match
+      if (userId !== authenticatedUserId) {
+        return res.status(403).json({
+          success: false,
+          message: 'User ID mismatch'
+        });
+      }
+
+      // Validate bet amount
+      if (isNaN(amount) || amount <= 0) {
         logger.error('[BET_PLACEMENT_ERROR] Invalid bet amount', { 
           amount, 
-          parsedAmount: betAmount,
           receivedBody: JSON.stringify(req.body)
         });
         return res.status(400).json({
@@ -87,19 +82,20 @@ router.post('/place',
 
       // Place bet
       const result = await betService.placeBet({ 
-        amount: betAmount, 
-        userId
+        amount: Number(amount), 
+        userId,
+        cashoutMultiplier: cashoutMultiplier ? Number(cashoutMultiplier) : null
       }, req);  // Pass entire request object
 
       // Track total bets
-      statsService.incrementTotalBetsByAmount(betAmount);
+      statsService.incrementTotalBetAmount(Number(amount));
 
       // Log successful bet placement
       logger.info('[BET_PLACEMENT_SUCCESS]', {
         betId: result.betId,
-        amount: betAmount,
+        amount: Number(amount),
         userId,
-        gameId: result.gameSessionId
+        gameId: gameService.gameState.gameId || 'N/A'
       });
 
       res.status(200).json(result);

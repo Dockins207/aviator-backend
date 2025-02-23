@@ -26,9 +26,6 @@ class WalletSocket {
         socket.user = user;
         next();
       } catch (error) {
-        logger.warn('Socket authentication failed', {
-          errorMessage: error.message
-        });
         return next(new Error('Authentication failed'));
       }
     });
@@ -58,10 +55,6 @@ class WalletSocket {
           const balance = await this.getUserWalletBalance(socket.user.id);
           socket.emit('wallet:balance', { balance });
         } catch (error) {
-          logger.error('Failed to get wallet balance', {
-            userId: socket.user.id,
-            errorMessage: error.message
-          });
           socket.emit('error', { 
             code: 'BALANCE_FETCH_FAILED', 
             message: 'Could not retrieve wallet balance' 
@@ -108,13 +101,6 @@ class WalletSocket {
             timestamp: new Date().toISOString()
           });
 
-          // Log successful deposit
-          logger.info('WALLET_DEPOSIT_SUCCESS', { 
-            userId: socket.user.id, 
-            amount,
-            newBalance: depositResult.newBalance
-          });
-
           // Optional: Confirm deposit to the initiating socket
           socket.emit('wallet:deposit:success', {
             status: 'success',
@@ -125,12 +111,6 @@ class WalletSocket {
           });
 
         } catch (error) {
-          logger.error('WALLET_DEPOSIT_FAILED', {
-            userId: socket.user.id,
-            amount: depositData.amount,
-            errorMessage: error.message
-          });
-
           socket.emit('wallet:deposit:error', {
             status: 'error',
             message: error.message,
@@ -176,11 +156,6 @@ class WalletSocket {
           // Broadcast updated balance to the user
           await this.emitUserWalletBalance(socket.user.id);
         } catch (error) {
-          logger.error('Wallet withdrawal failed', {
-            userId: socket.user.id,
-            errorMessage: error.message
-          });
-
           socket.emit('wallet:withdraw:error', {
             code: 'WITHDRAW_FAILED',
             message: error.message
@@ -227,14 +202,6 @@ class WalletSocket {
             timestamp: new Date().toISOString()
           });
 
-          // Log successful bet placement
-          logger.info('WALLET_BET_PLACED', { 
-            userId: socket.user.id, 
-            amount,
-            gameId,
-            newBalance: betResult.newBalance
-          });
-
           // Confirm bet placement to the initiating socket
           socket.emit('wallet:bet:success', {
             status: 'success',
@@ -246,13 +213,6 @@ class WalletSocket {
           });
 
         } catch (error) {
-          logger.error('WALLET_BET_PLACEMENT_FAILED', {
-            userId: socket.user.id,
-            amount: betData.amount,
-            gameId: betData.gameId,
-            errorMessage: error.message
-          });
-
           socket.emit('wallet:bet:error', {
             status: 'error',
             message: error.message,
@@ -301,14 +261,6 @@ class WalletSocket {
             timestamp: new Date().toISOString()
           });
 
-          // Log successful cashout
-          logger.info('WALLET_CASHOUT_SUCCESS', { 
-            userId: socket.user.id, 
-            amount,
-            gameId,
-            newBalance: cashoutResult.newBalance
-          });
-
           // Confirm cashout to the initiating socket
           socket.emit('wallet:cashout:success', {
             status: 'success',
@@ -320,13 +272,6 @@ class WalletSocket {
           });
 
         } catch (error) {
-          logger.error('WALLET_CASHOUT_FAILED', {
-            userId: socket.user.id,
-            amount: cashoutData.amount,
-            gameId: cashoutData.gameId,
-            errorMessage: error.message
-          });
-
           socket.emit('wallet:cashout:error', {
             status: 'error',
             message: error.message,
@@ -372,11 +317,6 @@ class WalletSocket {
             offset
           });
         } catch (error) {
-          logger.error('Wallet transaction history fetch failed', {
-            userId: socket.user.id,
-            errorMessage: error.message
-          });
-
           socket.emit('wallet:transactions:error', {
             code: 'TRANSACTIONS_FETCH_FAILED',
             message: error.message
@@ -400,23 +340,12 @@ class WalletSocket {
             throw new Error('Unauthorized balance refresh');
           }
 
-          logger.info('Manual wallet balance refresh requested', {
-            userId: socket.user.id,
-            requestTimestamp: refreshData.timestamp,
-            requestId: refreshData.requestId
-          });
-
           // Fetch and emit the latest balance
           await this.emitUserWalletBalance(socket.user.id, {
             requestId: refreshData.requestId,
             requestTimestamp: refreshData.timestamp
           });
         } catch (refreshError) {
-          logger.error('Wallet balance refresh failed', {
-            userId: socket.user.id,
-            errorMessage: refreshError.message
-          });
-          
           socket.emit('wallet:balance:error', {
             status: 'error',
             message: 'Balance refresh failed',
@@ -446,10 +375,6 @@ class WalletSocket {
           try {
             await this.emitUserWalletBalance(socket.user.id);
           } catch (refreshError) {
-            logger.warn('Periodic balance refresh failed', {
-              userId: socket.user.id,
-              errorMessage: refreshError.message
-            });
           }
         }
       }, 60000); // Refresh every minute
@@ -484,10 +409,6 @@ class WalletSocket {
         });
       }
     } catch (error) {
-      logger.error('Failed to emit wallet balance', {
-        userId,
-        errorMessage: error.message
-      });
     }
   }
 
@@ -502,23 +423,12 @@ class WalletSocket {
     try {
       // Validate payload
       if (!payload.userId) {
-        logger.warn('WALLET_UPDATE_MISSING_USER_ID', { payload });
         return;
       }
 
       // Emit to the wallet namespace
       this.walletNamespace.to(payload.userId).emit('wallet:update', payload);
-
-      logger.info('WALLET_SOCKET_UPDATE_SENT', { 
-        userId: payload.userId,
-        transactionType: payload.transactionType,
-        amount: payload.amount
-      });
     } catch (error) {
-      logger.error('WALLET_SOCKET_UPDATE_ERROR', {
-        errorMessage: error.message,
-        payload
-      });
     }
   }
 
@@ -529,7 +439,6 @@ class WalletSocket {
       const userSockets = await this.findUserSockets(userId);
 
       if (userSockets.length === 0) {
-        logger.warn('NO_ACTIVE_SOCKET_FOR_USER', { userId });
         return;
       }
 
@@ -537,17 +446,7 @@ class WalletSocket {
       userSockets.forEach(socketId => {
         this.walletNamespace.to(socketId).emit('wallet:balance_updated', walletUpdatePayload);
       });
-
-      logger.info('WALLET_UPDATE_BROADCASTED', { 
-        userId, 
-        socketCount: userSockets.length 
-      });
     } catch (error) {
-      logger.error('WALLET_BROADCAST_ERROR', {
-        userId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
     }
   }
 
