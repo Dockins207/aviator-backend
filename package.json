@@ -8,11 +8,12 @@
     "database"
   ],
   "scripts": {
-    "start": "cd backend && npm install && npm start",
-    "build": "cd backend && npm install && npm run build",
+    "start": "cd backend && npm install --production && npm start",
+    "build": "cd backend && npm install --production && npm run build",
     "dev": "cd backend && npm install && npm run dev",
     "test": "cd backend && npm test",
-    "lint": "cd backend && npm run lint"
+    "lint": "cd backend && npm run lint",
+    "install:prod": "npm install --production && cd backend && npm install --production"
   },
   "keywords": [
     "aviator",
