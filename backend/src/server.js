@@ -44,7 +44,8 @@ const corsOptions = {
       'https://www.aviator.game',
       'http://192.168.0.11:3000',
       'http://192.168.0.12:3000',
-      'http://192.168.0.12:8000'
+      'http://192.168.0.12:8000',
+      'https://avbetting.netlify.app'
     ];
 
     // Check if origin is undefined (for same-origin requests) or in allowed list
@@ -164,7 +165,8 @@ async function startServer() {
             'https://www.aviator.game',
             'http://192.168.0.11:3000',
             'http://192.168.0.12:3000',
-            'http://192.168.0.12:8000'
+            'http://192.168.0.12:8000',
+            'https://avbetting.netlify.app'
           ];
 
           // If no origin (like in server-to-server communication), allow

@@ -870,64 +870,33 @@ class BetService {
 
   async placeBetInBettingState(betDetails, authenticatedUser) {
     try {
-      // Get current game state with strict validation
-      const currentGameSession = await this.gameService.getCurrentGameState();
+      // Get current game state
+      const currentGameState = await this.gameService.getCurrentGameState();
       
-      // Log game state for debugging
-      this.logger.debug('CURRENT_GAME_STATE', {
-        service: 'aviator-backend',
-        gameState: currentGameSession.state,
-        gameId: currentGameSession.gameId,
-        timestamp: new Date().toISOString()
-      });
-
-      // Validate game state allows betting
-      if (!currentGameSession || currentGameSession.state !== this.GAME_STATES.BETTING) {
-        throw new ValidationError('INVALID_GAME_STATE', 
-          `Cannot place bets in ${currentGameSession?.state || 'unknown'} state`
-        );
+      // Determine initial bet state based on game state
+      let initialBetState;
+      if (currentGameState.status === this.GAME_STATES.BETTING) {
+        initialBetState = this.BET_STATES.PLACED;
+      } else {
+        initialBetState = this.BET_STATES.QUEUED;
       }
 
-      // Step 1: Create normalized bet details
-      const normalizedBet = this._normalizeBetDetails(
-        betDetails,
-        authenticatedUser,
-        currentGameSession.gameId,
-        this.BET_STATES.ACTIVE
-      );
-
-      // Step 2: Store bet in Redis with ACTIVE state
-      const activeBet = await this.redisRepository.storeBet(
-        currentGameSession.gameId,
-        normalizedBet
-      );
-
-      // Step 3: Deduct wallet balance after successful bet storage
-      await this.walletService.deductWalletBalance(
-        authenticatedUser.user_id, 
-        betDetails.amount
-      );
-
-      // Log successful activation
-      this.logger.info('BET_ACTIVATED_SUCCESSFULLY', {
-        betId: activeBet.id,
+      // Prepare bet with correct state
+      const bet = {
+        ...betDetails,
+        status: initialBetState,
+        gameSessionId: currentGameState.gameId, // Always assign current session ID
         userId: authenticatedUser.user_id,
-        gameState: currentGameSession.state,
-        activatedAt: new Date().toISOString(),
-        sessionId: currentGameSession.gameId
-      });
+        createdAt: new Date().toISOString()
+      };
 
-      return activeBet;
+      // Store bet with appropriate state
+      return await this.betTrackingService.storeBet(currentGameState.gameId, bet);
     } catch (error) {
-      // Log error with detailed context
-      this.logger.error('BET_PLACEMENT_ERROR', {
-        userId: authenticatedUser.user_id,
-        gameState: currentGameSession?.state,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        betDetails: {
-          amount: betDetails.amount
-        }
+      logger.error('PLACE_BET_ERROR', {
+        error: error.message,
+        userId: authenticatedUser?.user_id,
+        betDetails
       });
       throw error;
     }

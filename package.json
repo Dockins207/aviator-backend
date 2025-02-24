@@ -4,23 +4,19 @@
   "description": "Full-stack Aviator game application",
   "private": true,
   "workspaces": [
-    "frontend",
     "backend",
-    "admin",
     "database"
   ],
   "scripts": {
-    "start": "concurrently \"npm run start:frontend\" \"npm run start:backend\"",
-    "start:frontend": "npm run dev -w frontend",
+    "start": "npm run start:backend",
     "start:backend": "npm run dev -w backend",
-    "build": "npm run build -w frontend && npm run build -w backend && npm run build -w admin",
-    "test": "npm run test -w frontend && npm run test -w backend",
-    "lint": "npm run lint -w frontend -w backend -w admin"
+    "build": "npm run build -w backend",
+    "test": "npm run test -w backend",
+    "lint": "npm run lint -w backend"
   },
   "keywords": [
     "aviator",
     "game",
-    "react",
     "node",
     "typescript"
   ],

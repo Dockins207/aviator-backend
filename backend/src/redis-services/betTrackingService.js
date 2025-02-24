@@ -47,177 +47,75 @@ class BetTrackingService extends EventEmitter {
    * @returns {Object} Updated bet details
    */
   async transitionBetState(betId, gameSessionId, newState, additionalDetails = {}) {
-    // Validate inputs
-    if (!betId) {
-      logger.error('CRITICAL_BET_STATE_TRANSITION_FAILURE', {
-        reason: 'No bet ID provided',
-        gameSessionId,
-        newState
-      });
-      throw new Error('MISSING_BET_ID');
-    }
-
-    if (!gameSessionId) {
-      throw new Error('INVALID_GAME_SESSION_ID');
-    }
-
-    // Single attempt to retrieve bet
-    let existingBet = null;
     try {
-      // Log attempt to get bet
-      logger.info('BET_STATE_TRANSITION_ATTEMPT', {
-        betId,
-        gameSessionId,
-        newState,
-        timestamp: new Date().toISOString(),
-        context: 'transitionBetState'
-      });
+      // Validate inputs
+      if (!betId || !gameSessionId) {
+        throw new Error('INVALID_TRANSITION_PARAMETERS');
+      }
 
-      // Single attempt to get existing bet
-      existingBet = await this.redisRepository.getBetById(gameSessionId, betId);
+      // Get current game state
+      const currentGameState = await gameService.getCurrentGameState();
 
+      // Get existing bet
+      const existingBet = await this.redisRepository.getBetById(gameSessionId, betId);
       if (!existingBet) {
-        // Let caller handle bet not found case
         throw new Error('BET_NOT_FOUND');
       }
 
-      logger.info('BET_RETRIEVED_SUCCESSFULLY', {
-        betId,
-        gameSessionId,
-        currentState: existingBet.status
-      });
-    } catch (error) {
-      logger.error('BET_RETRIEVAL_ERROR', {
-        betId,
-        gameSessionId,
-        newState,
-        error: error.message,
-        timestamp: new Date().toISOString(),
-        context: 'transitionBetState'
-      });
-      throw error;
-    }
+      // Normalize existing bet status
+      const currentStatus = existingBet.status || this.BET_STATES.PLACED;
 
-    // Ensure we have a user ID
-    if (!existingBet.userId) {
-      logger.error('MISSING_USER_ID_DURING_TRANSITION', {
-        betId,
-        gameSessionId,
-        existingBetDetails: existingBet,
-        context: 'transitionBetState'
-      });
-      throw new Error('MISSING_USER_ID_IN_BET');
-    }
+      // Define state transition rules
+      const validTransitions = {
+        [this.BET_STATES.PLACED]: [this.BET_STATES.ACTIVE, this.BET_STATES.EXPIRED],
+        [this.BET_STATES.QUEUED]: [this.BET_STATES.ACTIVE, this.BET_STATES.EXPIRED],
+        [this.BET_STATES.ACTIVE]: [this.BET_STATES.COMPLETE, this.BET_STATES.EXPIRED],
+        [this.BET_STATES.COMPLETE]: [], // Terminal state
+        [this.BET_STATES.EXPIRED]: [], // Terminal state,
+      };
 
-    // Normalize existing bet status with validation
-    const currentStatus = existingBet.status || this.BET_STATES.PLACED;
-    
-    // Validate current status is a known state
-    if (!Object.values(this.BET_STATES).includes(currentStatus)) {
-      logger.error('INVALID_CURRENT_BET_STATUS', {
-        betId,
-        gameSessionId,
-        currentStatus,
-        validStates: Object.values(this.BET_STATES),
-        context: 'transitionBetState'
-      });
-      throw new Error('INVALID_CURRENT_BET_STATUS');
-    }
-
-    // Define and validate state transition rules
-    const validTransitions = {
-      [this.BET_STATES.PLACED]: [this.BET_STATES.ACTIVE, this.BET_STATES.EXPIRED],
-      [this.BET_STATES.ACTIVE]: [this.BET_STATES.COMPLETE, this.BET_STATES.EXPIRED],
-      [this.BET_STATES.COMPLETE]: [], // Terminal state
-      [this.BET_STATES.EXPIRED]: [], // Terminal state
-      undefined: [this.BET_STATES.ACTIVE, this.BET_STATES.PLACED] // Special case
-    };
-
-    // Validate new state is a known state
-    if (!Object.values(this.BET_STATES).includes(newState)) {
-      logger.error('INVALID_NEW_BET_STATE', {
-        betId,
-        gameSessionId,
-        newState,
-        validStates: Object.values(this.BET_STATES),
-        context: 'transitionBetState'
-      });
-      throw new Error('INVALID_NEW_BET_STATE');
-    }
-
-    // Check if transition is valid
-    if (!validTransitions[currentStatus]?.includes(newState)) {
-      const errorMessage = `INVALID_STATE_TRANSITION: ${currentStatus} -> ${newState}`;
-      logger.error('INVALID_STATE_TRANSITION', {
-        betId,
-        gameSessionId,
-        fromState: currentStatus,
-        toState: newState,
-        validTransitions: validTransitions[currentStatus],
-        context: 'transitionBetState'
-      });
-
-      // Only allow invalid transitions in development with explicit warning
-      if (process.env.NODE_ENV !== 'production') {
-        logger.warn('ALLOWING_INVALID_TRANSITION_IN_DEV', {
-          betId,
-          fromState: currentStatus,
-          toState: newState,
-          gameSessionId,
-          context: 'transitionBetState'
-        });
-      } else {
-        throw new Error(errorMessage);
+      // Validate transition
+      if (!validTransitions[currentStatus]?.includes(newState)) {
+        throw new Error(`INVALID_STATE_TRANSITION: ${currentStatus} -> ${newState}`);
       }
-    }
 
-    // Prepare updated bet details with strict validation
-    const updatedBet = {
-      ...existingBet,
-      ...additionalDetails,
-      id: betId,
-      userId: existingBet.userId,
-      status: newState,
-      gameSessionId,
-      updatedAt: new Date().toISOString(),
-      previousState: currentStatus,
-      stateHistory: [
-        ...(existingBet.stateHistory || []),
-        {
-          from: currentStatus,
-          to: newState,
-          timestamp: new Date().toISOString()
-        }
-      ],
-      userDetails: {
-        ...existingBet.userDetails,
-        ...(additionalDetails.userDetails || {})
-      }
-    };
+      // Prepare updated bet with current session ID
+      const updatedBet = {
+        ...existingBet,
+        ...additionalDetails,
+        id: betId,
+        userId: existingBet.userId,
+        status: newState,
+        gameSessionId: currentGameState.gameId, // Always use current session ID
+        updatedAt: new Date().toISOString(),
+        previousState: currentStatus,
+        stateHistory: [
+          ...(existingBet.stateHistory || []),
+          {
+            from: currentStatus,
+            to: newState,
+            timestamp: new Date().toISOString()
+          }
+        ]
+      };
 
-    // Single attempt to store updated bet
-    try {
-      await this.redisRepository.storeBet(gameSessionId, updatedBet);
-      
-      // Log successful transition
+      // Store updated bet
+      await this.redisRepository.storeBet(currentGameState.gameId, updatedBet);
+
       logger.info('BET_STATE_TRANSITION_SUCCESS', {
         betId,
         userId: existingBet.userId,
         fromState: currentStatus,
         toState: newState,
-        gameSessionId,
-        context: 'transitionBetState'
+        gameSessionId: currentGameState.gameId
       });
 
       return updatedBet;
     } catch (error) {
-      logger.error('BET_STATE_TRANSITION_STORAGE_FAILED', {
-        betId,
-        gameSessionId,
-        fromState: currentStatus,
-        toState: newState,
+      logger.error('BET_STATE_TRANSITION_ERROR', {
         error: error.message,
-        context: 'transitionBetState'
+        betId,
+        gameSessionId
       });
       throw error;
     }
@@ -2062,62 +1960,49 @@ class BetTrackingService extends EventEmitter {
    */
   async storeBet(gameSessionId, betDetails) {
     try {
-      // Generate unique bet ID if not provided
-      const normalizedBetDetails = {
-        id: betDetails.id || uuidv4(),
-        userId: betDetails.userId,
-        gameId: gameSessionId,
-        amount: betDetails.amount,
-        cashoutMultiplier: betDetails.cashoutMultiplier || null,
-        status: betDetails.status || this.BET_STATES.PLACED,
-        userDetails: {
-          username: betDetails.userDetails?.username || 'unknown',
-          role: betDetails.userDetails?.role || 'player'
-        },
-        metadata: {
-          ...betDetails.metadata,
-          createdAt: Date.now(),
-          gameStatus: betDetails.metadata?.gameStatus || 'unknown'
-        }
-      };
+      // Validate required fields
+      if (!gameSessionId || !betDetails) {
+        throw new Error('INVALID_STORAGE_PARAMETERS');
+      }
+
+      // Get current game state
+      const currentGameState = await gameService.getCurrentGameState();
+
+      // Determine bet state based on game state
+      let betState;
+      if (currentGameState.status === this.GAME_STATES.BETTING) {
+        betState = this.BET_STATES.PLACED;
+      } else {
+        betState = this.BET_STATES.QUEUED;
+      }
 
       // Prepare bet for storage
-      const betToStore = {
-        ...normalizedBetDetails,
-        expiresAt: Date.now() + SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS * 1000
+      const normalizedBet = {
+        ...betDetails,
+        id: betDetails.id || uuidv4(),
+        gameSessionId: currentGameState.gameId, // Always use current session ID
+        status: betState,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
       };
 
-      // Store bet in Redis
-      const betKey = `game_session_bets:${gameSessionId}:${normalizedBetDetails.id}`;
-      
-      // Use consistent storage method
-      await this._redisRepository.storeBetInRedis(
-        gameSessionId, 
-        normalizedBetDetails.id, 
-        betToStore
-      );
+      // Store bet with Redis
+      await this.redisRepository.storeBet(currentGameState.gameId, normalizedBet);
 
-      // Log bet storage
-      logger.info('BET_STORAGE_SUCCESS', {
-        betId: normalizedBetDetails.id,
-        userId: normalizedBetDetails.userId,
-        gameSessionId,
-        betStatus: normalizedBetDetails.status
+      logger.info('BET_STORED_SUCCESSFULLY', {
+        betId: normalizedBet.id,
+        userId: normalizedBet.userId,
+        status: betState,
+        gameSessionId: currentGameState.gameId
       });
 
-      return normalizedBetDetails;
+      return normalizedBet;
     } catch (error) {
-      // Comprehensive error logging
       logger.error('BET_STORAGE_ERROR', {
-        errorMessage: error.message,
-        userId: betDetails.userId,
+        error: error.message,
         gameSessionId,
-        betDetails: {
-          amount: betDetails.amount,
-          status: betDetails.status
-        }
+        betDetails
       });
-
       throw error;
     }
   }
@@ -2130,7 +2015,7 @@ class BetTrackingService extends EventEmitter {
   async getBetsForGameSession(gameSessionId) {
     try {
       const betsKey = `game_session_bets:${gameSessionId}`;
-      const bets = await this._redisRepository.getAllBetsForGameSession(betsKey);
+      const bets = await this.redisRepository.getAllBetsForGameSession(betsKey);
 
       return bets.map(bet => ({
         ...bet,

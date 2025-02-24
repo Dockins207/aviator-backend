@@ -318,55 +318,59 @@ class RedisRepository {
     return this._client && this._client.isOpen;
   }
 
-  // Modify existing methods to use ensureClientReady
-  async bulkActivateBets(bulkActivationData, targetState) {
-    // Ensure client is ready
-    await this.ensureClientReady();
-
-    // Rest of the existing implementation...
-    const activationResults = {
-      successCount: 0,
-      failedCount: 0,
-      successfulBetIds: [],
-      failedBetIds: [],
-      processingTime: 0,
-      error: false,
-      errorMessage: null
-    };
-
-    const startTime = Date.now();
-
+  /**
+   * Store a bet with consistent format and storage strategy
+   * @param {string} gameSessionId - Current game session ID
+   * @param {Object} betDetails - Bet details to store
+   * @returns {Promise<Object>} Stored bet details
+   */
+  async storeBet(gameSessionId, betDetails) {
     try {
-      // Validate Redis client initialization
-      if (!this._client) {
-        logger.error('REDIS_CLIENT_NOT_INITIALIZED', {
-          method: 'bulkActivateBets',
-          message: 'Redis client is undefined or not properly initialized'
-        });
-        throw new Error('Redis client not initialized');
+      // Validate required fields
+      if (!gameSessionId || !betDetails || !betDetails.id || !betDetails.userId) {
+        throw new Error('INVALID_BET_DETAILS');
       }
 
-      // ... (rest of the existing implementation remains the same)
-    } catch (error) {
-      // ... (existing error handling)
-    }
-  }
+      // Store bet in appropriate Redis key based on state
+      const betKey = `bet:${betDetails.id}`;
+      const gameSessionKey = `game_session_bets:${gameSessionId}`;
+      const userBetsKey = `aviator:user_wagers:${betDetails.userId}`;
 
-  // Add cleanup method
-  async cleanup() {
-    try {
-      // Clear session cleanup interval
-      if (this.sessionCleanupInterval) {
-        clearInterval(this.sessionCleanupInterval);
+      // Store bet details
+      await this.multi()
+        .hSet(betKey, {
+          ...betDetails,
+          gameSessionId,
+          updatedAt: new Date().toISOString()
+        })
+        .sAdd(gameSessionKey, betDetails.id)
+        .sAdd(userBetsKey, betDetails.id)
+        .exec();
+
+      // If bet is PLACED or QUEUED, add to appropriate tracking set
+      if (betDetails.status === 'PLACED') {
+        await this.client.sAdd(`aviator:bets:${gameSessionId}:placed`, betDetails.id);
+      } else if (betDetails.status === 'QUEUED') {
+        await this.client.sAdd(`aviator:bets:${gameSessionId}:queued`, betDetails.id);
       }
-      if (this._client) {
-        await this._client.quit();
-      }
-    } catch (error) {
-      logger.error('REDIS_CLEANUP_FAILED', {
-        errorMessage: error.message,
-        errorStack: error.stack
+
+      // Store wager details for analytics
+      await this.hSet(`aviator:wager_details:${betDetails.id}`, {
+        userId: betDetails.userId,
+        amount: betDetails.amount,
+        status: betDetails.status,
+        gameSessionId,
+        createdAt: betDetails.createdAt || new Date().toISOString()
       });
+
+      return betDetails;
+    } catch (error) {
+      logger.error('REDIS_BET_STORAGE_ERROR', {
+        error: error.message,
+        gameSessionId,
+        betId: betDetails?.id
+      });
+      throw error;
     }
   }
 
@@ -560,7 +564,7 @@ class RedisRepository {
 
   /**
    * Get all queued bets for a game session
-   * @param {string} gameId - Game session identifier
+   * @param {string} gameSessionId - Game session identifier
    * @returns {Promise<Array>} List of queued bets
    */
   async getQueuedBets(gameSessionId = null) {
@@ -587,11 +591,6 @@ class RedisRepository {
           try {
             return result ? JSON.parse(result) : null;
           } catch (e) {
-            logger.error('QUEUED_BET_PARSE_ERROR', {
-              error: e.message,
-              betId,
-              gameSessionId
-            });
             return null;
           }
         })
@@ -2505,38 +2504,29 @@ class RedisRepository {
       
       const betId = betDetails.id || uuidv4();
       
-      // Validate cashout strategy
-      if (!cashoutStrategy || 
-          (cashoutStrategy.type !== 'manual' && cashoutStrategy.type !== 'auto')) {
-        throw new Error('Invalid cashout strategy');
-      }
+      // Always use global queue key for queued bets
+      const queueKey = 'global:queued_bets';
 
-      // Enhance bet details with queuing metadata, session tracking, and cashout strategy
-      const queuedBetData = {
+      // Add expiration timestamp to bet details
+      const queuedBet = {
         ...betDetails,
         id: betId,  // Ensure consistent ID key
-        cashoutStrategy: {
-          type: cashoutStrategy.type,
-          multiplier: cashoutStrategy.type === 'auto' ? cashoutStrategy.multiplier : null
-        },
         queuedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + expirationTime * 1000).toISOString(),
         status: 'queued',
-        originalSessionId: currentSession, // Track which session it was queued from
+        originalSessionId: currentSession, // Track originating session
         gameSessionId: null // Will be updated when activated in next session
       };
 
       // Store in queued bets index with session tracking
-      const queueKey = `game:${currentSession}:queued_bets`;
-      await client.hSet(queueKey, betId, JSON.stringify(queuedBetData));
+      await client.hSet(queueKey, betId, JSON.stringify(queuedBet));
       
       // Add to queued bets set for efficient retrieval
-      const queuedSetKey = `game:${currentSession}:queued_set`;
-      await client.sAdd(queuedSetKey, betId);
+      await client.sAdd(`game:${currentSession}:queued_set`, betId);
       
       // Set expiration on both keys
       await client.expire(queueKey, expirationTime);
-      await client.expire(queuedSetKey, expirationTime);
+      await client.expire(`game:${currentSession}:queued_set`, expirationTime);
 
       logger.info('Bet queued for next session', { 
         betId, 
@@ -3159,8 +3149,8 @@ class RedisRepository {
         queuedAt: currentTime,
         expiresAt: currentTime + SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS * 1000,
         status: 'queued',
-        originalSessionId: sessionId, // Track originating session
-        gameSessionId: null // Will be assigned when activated in next session
+        originalSessionId: sessionId, // Track which session it was queued from
+        gameSessionId: null // Will be updated when activated in next session
       };
 
       // Determine the appropriate method for storing the bet

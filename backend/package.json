@@ -6,8 +6,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --experimental-specifier-resolution=node src/server.js",
-    "dev": "nodemon src/server.js",
-    "build": "echo 'Preparing backend for production...' && npm run migrate",
+    "dev": "nodemon --experimental-specifier-resolution=node src/server.js",
+    "build": "npm run clean && npm run copy",
+    "copy": "cp -r src dist",
+    "clean": "rm -rf dist",
     "migrate": "node --experimental-specifier-resolution=node ../database/scripts/migrate.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:redis": "node --experimental-specifier-resolution=node tests/redisIntegration.test.js",
@@ -35,6 +37,10 @@
     "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "@babel/cli": "^7.23.9",
+    "@babel/core": "^7.24.0",
+    "@babel/plugin-transform-modules-commonjs": "^7.24.0",
+    "@babel/preset-env": "^7.24.0",
+    "nodemon": "^3.1.0"
   }
 }
