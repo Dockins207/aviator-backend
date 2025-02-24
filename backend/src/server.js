@@ -16,6 +16,7 @@ import authRoutes from './routes/authRoutes.js';
 import gameRoutes from './routes/gameRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
 import betRoutes from './routes/betRoutes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
 import { initializeStatsService } from './routes/betRoutes.js';
 import schedule from 'node-schedule';
 import { authService } from './services/authService.js';
@@ -35,44 +36,13 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const app = express();
 
 // Completely open CORS configuration for development
-const corsOptions = {
-  origin: function(origin, callback) {
-    const allowedOrigins = [
-      'http://localhost:3000', 
-      'http://localhost:8000',
-      'https://aviator.game', 
-      'https://www.aviator.game',
-      'http://192.168.0.11:3000',
-      'http://192.168.0.12:3000',
-      'http://192.168.0.12:8000',
-      'https://avbetting.netlify.app'
-    ];
-
-    // Check if origin is undefined (for same-origin requests) or in allowed list
-    if (!origin || allowedOrigins.includes(origin) || 
-        (origin && /^http:\/\/192\.168\.0\.\d+:\d+$/.test(origin))) {
-      callback(null, true);
-    } else {
-      logger.warn('SOCKET_CORS_ORIGIN_REJECTED', {
-        service: 'aviator-backend',
-        origin: origin,
-        allowedOrigins: allowedOrigins
-      });
-      // Allow all origins during development if not in production
-      if (process.env.NODE_ENV !== 'production') {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    }
-  },
+app.use(cors({
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token'],
-  credentials: true
-};
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Middleware
-app.use(cors(corsOptions));
 app.use(express.json());
 app.use(errorMiddleware);
 
@@ -279,8 +249,9 @@ async function startServer() {
     // Basic routes
     app.use('/api/auth', authRoutes);
     app.use('/api/game', gameRoutes);
-    app.use('/api/wallet', walletRoutes);
     app.use('/api/bets', betRoutes);  
+    app.use('/api/wallet', walletRoutes);
+    app.use('/api/payments', paymentRoutes);
     app.get('/', (req, res) => {
       res.json({ 
         message: 'Aviator Game Backend', 

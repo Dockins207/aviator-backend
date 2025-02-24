@@ -349,9 +349,9 @@ class RedisRepository {
 
       // If bet is PLACED or QUEUED, add to appropriate tracking set
       if (betDetails.status === 'PLACED') {
-        await this.client.sAdd(`aviator:bets:${gameSessionId}:placed`, betDetails.id);
+        await this.client.sAdd(`placed_bets:${gameSessionId}`, betDetails.id);
       } else if (betDetails.status === 'QUEUED') {
-        await this.client.sAdd(`aviator:bets:${gameSessionId}:queued`, betDetails.id);
+        await this.client.sAdd(`queued_bets:${gameSessionId}`, betDetails.id);
       }
 
       // Store wager details for analytics
@@ -382,7 +382,7 @@ class RedisRepository {
   async getPlacedBets(gameId) {
     try {
       const client = await this.ensureClientReady();
-      const statusKey = `game:${gameId}:status:placed`;
+      const statusKey = `placed_bets:${gameId}`;
       
       // Get all placed bet IDs
       const placedBetIds = await client.sMembers(statusKey);
@@ -468,7 +468,7 @@ class RedisRepository {
       // Store bet in multiple indices for efficient retrieval
       const betKey = `game:${gameId}:bets`;
       const userBetKey = `user:${betData.userId}:bets`;
-      const statusKey = `game:${gameId}:status:${sanitizedBetData.status}`;
+      const statusKey = `placed_bets:${gameId}`;
       const allBetsKey = `game:${gameId}:all_bets`;
       
       // Use multi to ensure atomic operations
@@ -570,7 +570,7 @@ class RedisRepository {
   async getQueuedBets(gameSessionId = null) {
     try {
       const client = await this.ensureClientReady();
-      const key = `game:${gameSessionId}:status:queued`;
+      const key = `queued_bets:${gameSessionId}`;
       
       // Get all queued bet IDs
       const queuedBetIds = await client.sMembers(key);
@@ -726,7 +726,7 @@ class RedisRepository {
       
       const betKey = `game:${gameId}:bets`;
       const userBetKey = `user:${bet.userId}:bets`;
-      const statusKey = `game:${gameId}:status:${bet.status}`;
+      const statusKey = `placed_bets:${gameId}`;
       
       // Remove from all indices atomically
       const multi = client.multi();
@@ -1567,10 +1567,10 @@ class RedisRepository {
   async getPlacedBetsByGameSession(gameSessionId) {
     try {
       // Construct Redis key for game session bets
-      const gameSessionBetsKey = `game:${gameSessionId}:placed_bets`;
+      const gameSessionBetsKey = `placed_bets:${gameSessionId}`;
       
       // Retrieve bets from Redis
-      const placedBets = await this._client.hgetall(gameSessionBetsKey);
+      const placedBets = await this._client.hGetAll(gameSessionBetsKey);
       
       // Convert Redis hash to array of bet objects
       const betsArray = Object.entries(placedBets || {}).map(([betId, betData]) => {
@@ -1614,7 +1614,7 @@ class RedisRepository {
       const nextSessionBetsKey = 'game:next_session:bets';
       
       // Retrieve bets from Redis
-      const nextSessionBets = await this._client.hgetall(nextSessionBetsKey);
+      const nextSessionBets = await this._client.hGetAll(nextSessionBetsKey);
       
       // Convert Redis hash to array of bet objects
       const betsArray = Object.entries(nextSessionBets || {}).map(([betId, betData]) => {
@@ -1632,7 +1632,7 @@ class RedisRepository {
           return null;
         }
       }).filter(bet => bet !== null);
-
+      
       this.logger.info('Retrieved next session bets', {
         betsCount: betsArray.length
       });
@@ -1656,7 +1656,7 @@ class RedisRepository {
       const orphanedBetsKey = 'game:orphaned_bets';
       
       // Retrieve bets from Redis
-      const orphanedBets = await this._client.hgetall(orphanedBetsKey);
+      const orphanedBets = await this._client.hGetAll(orphanedBetsKey);
       
       // Convert Redis hash to array of bet objects
       const betsArray = Object.entries(orphanedBets || {}).map(([betId, betData]) => {
@@ -2210,7 +2210,7 @@ class RedisRepository {
     
     // Prepare storage keys
     const betKey = `game:${gameSessionId}:bets`;
-    const statusKey = `game:${gameSessionId}:status:${betStatus}`;
+    const statusKey = `placed_bets:${gameSessionId}`;
 
     try {
       const client = await this.ensureClientReady();
@@ -2514,7 +2514,7 @@ class RedisRepository {
         queuedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + expirationTime * 1000).toISOString(),
         status: 'queued',
-        originalSessionId: currentSession, // Track originating session
+        originalSessionId: currentSession, // Track which session it was queued from
         gameSessionId: null // Will be updated when activated in next session
       };
 
@@ -2769,7 +2769,7 @@ class RedisRepository {
           return null;
         }
       }).filter(bet => bet !== null);
-
+      
       logger.info('ACTIVE_BETS_RETRIEVED_FROM_REDIS', {
         userId,
         activeBetCount: activeBets.length,
@@ -3010,13 +3010,22 @@ class RedisRepository {
       const client = await this.ensureClientReady();
       const key = 'global:queued_bets';
 
-      // Retrieve all queued bets using hGetAll since we store them in a hash
-      const rawBets = await client.hGetAll(key);
-      
+      // Retrieve all queued bets using compatible methods
+      let queuedBetsRaw = {};
+      if (typeof this._client.hgetall === 'function') {
+        queuedBetsRaw = await this._client.hgetall(key);
+      } else if (typeof this._client.hkeys === 'function' && typeof this._client.hget === 'function') {
+        const betKeys = await this._client.hkeys(key);
+        for (const betKey of betKeys) {
+          const betData = await this._client.hget(key, betKey);
+          queuedBetsRaw[betKey] = betData;
+        }
+      }
+
       const queuedBets = [];
       
       // Process each bet in the hash
-      for (const [betId, rawBet] of Object.entries(rawBets)) {
+      for (const [betId, rawBet] of Object.entries(queuedBetsRaw)) {
         try {
           const bet = JSON.parse(rawBet);
           
@@ -3029,12 +3038,14 @@ class RedisRepository {
             continue;
           }
 
-          // Add metadata
-          queuedBets.push({
-            ...bet,
-            queueSource: key,
-            status: 'queued'
-          });
+          // Add metadata and only add unique bets
+          if (!queuedBets.some(existingBet => existingBet.id === bet.id)) {
+            queuedBets.push({
+              ...bet,
+              queueSource: key,
+              status: 'queued'
+            });
+          }
         } catch (parseError) {
           logger.warn('QUEUED_BET_PARSE_FAILURE', {
             betId,
@@ -3153,30 +3164,15 @@ class RedisRepository {
         gameSessionId: null // Will be updated when activated in next session
       };
 
-      // Determine the appropriate method for storing the bet
-      if (typeof this._client.hset === 'function') {
-        // Modern Redis clients (ioredis, node-redis v4+)
-        await this._client.hset(queueKey, betId, JSON.stringify(queuedBet));
-      } else if (typeof this._client.hmset === 'function') {
-        // Older Redis clients
-        await this._client.hmset(queueKey, betId, JSON.stringify(queuedBet));
-      } else if (typeof this._client.set === 'function') {
-        // Fallback method for simple clients
-        await this._client.set(
-          `${queueKey}:${betId}`, 
-          JSON.stringify(queuedBet), 
-          { 
-            EX: SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS 
-          }
-        );
-      } else {
-        throw new Error('UNSUPPORTED_REDIS_CLIENT: No compatible method found for storing bet');
-      }
+      // Store in queued bets index with session tracking
+      await client.hSet(queueKey, betId, JSON.stringify(queuedBet));
       
-      // Set expiration for the storage
-      if (typeof this._client.expire === 'function') {
-        await this._client.expire(queueKey, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
-      }
+      // Add to queued bets set for efficient retrieval
+      await client.sAdd(`game:${sessionId}:queued_set`, betId);
+      
+      // Set expiration on both keys
+      await client.expire(queueKey, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
+      await client.expire(`game:${sessionId}:queued_set`, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
 
       logger.info('BET_QUEUED_FOR_SESSION', {
         betId,
@@ -3255,7 +3251,7 @@ class RedisRepository {
       }
 
       // Log retrieval details
-      logger.debug('QUEUED_BETS_RETRIEVAL', {
+      logger.debug('QUEUED_BETS_RETRIEVED', {
         sessionId,
         totalQueuedBets: queuedBets.length,
         betIds: queuedBets.map(bet => bet.id)
@@ -3394,9 +3390,9 @@ class RedisRepository {
         queuedBetsRaw = await this._client.hgetall(queueKey);
       } else if (typeof this._client.hkeys === 'function' && typeof this._client.hget === 'function') {
         const betKeys = await this._client.hkeys(queueKey);
-        for (const key of betKeys) {
-          const betData = await this._client.hget(queueKey, key);
-          queuedBetsRaw[key] = betData;
+        for (const betKey of betKeys) {
+          const betData = await this._client.hget(queueKey, betKey);
+          queuedBetsRaw[betKey] = betData;
         }
       }
 
@@ -3618,6 +3614,20 @@ class RedisRepository {
     }
   }
 
+  async smembers(key) {
+    try {
+      const client = await this.ensureClientReady();
+      return await client.sMembers(key);
+    } catch (error) {
+      logger.error('REDIS_SMEMBERS_ERROR', {
+        key,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
   /**
    * Normalize bet details to a consistent format
    * @param {string} gameSessionId - Game session identifier
@@ -3687,6 +3697,11 @@ class RedisRepository {
     // Add game session ID
     extractedDetails.gameSessionId = gameSessionId;
     return extractedDetails;
+  }
+
+  async hgetall(key) {
+    const client = await this.ensureClientReady();
+    return await client.hGetAll(key);
   }
 
   async getPlacedBets(gameSessionId) {
@@ -3783,6 +3798,34 @@ class RedisRepository {
     }
 
     return activationResults;
+  }
+
+  /**
+   * Add a bet to the active bets set for a game session
+   * @param {string} gameSessionId - Game session ID
+   * @param {string} betId - Bet ID to add
+   * @returns {Promise<void>}
+   */
+  async addActiveBet(gameSessionId, betId) {
+    try {
+      const key = `game:${gameSessionId}:activeBets`;
+      await this.redis.sadd(key, betId);
+      
+      // Set expiration for cleanup (24 hours)
+      await this.redis.expire(key, 24 * 60 * 60);
+      
+      logger.debug('Added bet to active bets set', {
+        gameSessionId,
+        betId
+      });
+    } catch (error) {
+      logger.error('Failed to add bet to active bets set', {
+        gameSessionId,
+        betId,
+        error: error.message
+      });
+      throw error;
+    }
   }
 }
 

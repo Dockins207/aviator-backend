@@ -1,6 +1,5 @@
 import pkg from 'pg';
 const { Pool } = pkg;
-import logger from '../config/logger.js';
 
 // Create a new pool using the connection string
 const pool = new Pool({
@@ -22,71 +21,62 @@ const pool = new Pool({
   ssl: false, // explicitly disable SSL if not required
 });
 
-// Persistent connection management
-let isConnected = false;
+// Error handler for pool errors
+pool.on('error', (err) => {
+  console.error('Unexpected database pool error:', err.message);
+});
 
 // Prevent multiple connection logs
 let _hasLoggedDatabaseConnection = false;
 
-async function connectWithRetry(maxRetries = 10) {  // Increased max retries
+async function connectWithRetry(maxRetries = 5) {
+  let lastError = null;
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`🔌 Attempting Database Connection (Attempt ${attempt})`);
+      console.log('Attempting database connection', { attempt, maxRetries });
       
       const client = await pool.connect();
       
-      // Verify basic database functionality with timeout
-      const queryPromise = client.query('SELECT NOW()');
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Query Timeout')), 3000)
-      );
-      
-      await Promise.race([queryPromise, timeoutPromise]);
-      
-      // Log successful connection only once
-      if (!_hasLoggedDatabaseConnection) {
-        logger.info('Database Connection Established', { 
-          host: process.env.DB_HOST || 'localhost',
-          port: process.env.DB_PORT || 5432,
-          database: process.env.DB_NAME || 'aviator_db',
-          user: process.env.DB_USER || 'admin'
-        });
-        _hasLoggedDatabaseConnection = true;
+      try {
+        // Test the connection with a simple query
+        await client.query('SELECT NOW()');
+        
+        if (!_hasLoggedDatabaseConnection) {
+          console.log('Database connection established', {
+            host: process.env.DB_HOST || 'localhost',
+            database: process.env.DB_NAME || 'aviator_db',
+            attempt
+          });
+          _hasLoggedDatabaseConnection = true;
+        }
+        
+        client.release();
+        return true;
+      } catch (queryError) {
+        client.release();
+        throw queryError;
       }
-      
-      isConnected = true;
-      
-      // Release the client back to the pool
-      client.release();
-      
-      return true;
-    } catch (err) {
-      // Enhanced error logging
-      logger.error('Database Connection Failure', { 
-        error: err.message,
-        errorName: err.name,
-        errorCode: err.code,
-        attempt: attempt,
-        maxRetries: maxRetries,
-        host: process.env.DB_HOST || 'localhost',
-        port: process.env.DB_PORT || 5432,
-        database: process.env.DB_NAME || 'aviator_db',
-        errorStack: err.stack
+    } catch (error) {
+      lastError = error;
+      console.error('Database connection attempt failed:', {
+        attempt,
+        error: error.message
       });
       
-      // Exponential backoff
-      await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+      if (attempt < maxRetries) {
+        // Wait before retrying, with exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        console.log('Waiting before next connection attempt', { delay });
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
   }
-  
-  // Critical failure logging
-  logger.error('CRITICAL_DATABASE_CONNECTION_FAILURE', {
-    message: 'Failed to establish database connection after multiple attempts',
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT || 5432,
-    database: process.env.DB_NAME || 'aviator_db'
+
+  console.error('Database connection failed after all retries', {
+    maxRetries,
+    lastError: lastError?.message
   });
-  
   return false;
 }
 
@@ -95,28 +85,23 @@ connectWithRetry();
 
 // Periodic connection health check
 const connectionHealthCheck = setInterval(async () => {
-  if (!isConnected) {
+  if (!_hasLoggedDatabaseConnection) {
     await connectWithRetry();
   }
   
   try {
-    // Lightweight query to check connection
-    await pool.query('SELECT 1');
-  } catch (err) {
-    logger.error('Database connection lost', { 
-      error: err.message,
-      host: process.env.DB_HOST || 'localhost',
-      port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-      database: process.env.DB_NAME || 'aviator_db',
-      user: process.env.DB_USER || 'admin',
-    });
-    isConnected = false;
+    const client = await pool.connect();
+    await client.query('SELECT NOW()');
+    client.release();
+  } catch (error) {
+    console.error('Database health check failed:', error.message);
+    _hasLoggedDatabaseConnection = false;
   }
 }, 60000); // Check every minute
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  logger.info('Closing database connection pool', {
+  console.log('Closing database connection pool', {
     host: process.env.DB_HOST || 'localhost',
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
     database: process.env.DB_NAME || 'aviator_db',

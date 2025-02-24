@@ -11,7 +11,17 @@ export default function wagerMonitorSocket(io) {
   // Apply socket authentication middleware
   wagerNamespace.use(socketAuthMiddleware);
 
-  wagerNamespace.on('connection', (socket) => {
+  // Socket connection handler
+  wagerNamespace.on('connection', async (socket) => {
+    // Log socket connection immediately
+    logger.info('SOCKET_CONNECTED', {
+      timestamp: new Date().toISOString(),
+      socketId: socket.id,
+      userId: socket.user?.user_id,
+      username: socket.user?.username,
+      authData: socket.handshake.auth
+    });
+
     const userId = socket.user?.user_id;
     const username = socket.user?.username;
 
@@ -27,18 +37,53 @@ export default function wagerMonitorSocket(io) {
 
     // Event: Place a new bet
     socket.on('place_bet', async (betData, callback) => {
+      // Log raw bet data immediately
+      logger.warn('RAW_BET_DATA_RECEIVED', {
+        timestamp: new Date().toISOString(),
+        socketId: socket.id,
+        userId: socket.user?.user_id,
+        username: socket.user?.username,
+        rawBetData: betData,
+        socketAuthData: socket.handshake.auth,
+        hasSocketUser: !!socket.user
+      });
+
       try {
+        // Log validated socket auth
+        logger.info('SOCKET_AUTH_VALID', {
+          timestamp: new Date().toISOString(),
+          socketId: socket.id,
+          userId,
+          username
+        });
+
         // Validate bet data
         if (!betData.gameId || !betData.betAmount) {
+          logger.error('INVALID_BET_DATA', {
+            timestamp: new Date().toISOString(),
+            socketId: socket.id,
+            userId,
+            betData
+          });
           throw new Error('Invalid bet data');
         }
 
         const wager = await wagerMonitorService.placeBet(
-          userId,  
-          betData.gameId, 
+          userId,
+          betData.gameId,
           betData.betAmount,
           username
         );
+
+        // Log successful bet placement
+        logger.info('BET_PLACED_SUCCESS', {
+          timestamp: new Date().toISOString(),
+          socketId: socket.id,
+          userId,
+          username,
+          betAmount: wager.betAmount,
+          gameId: wager.gameId
+        });
 
         // Broadcast only raw bet data
         wagerNamespace.emit('bet_placed', { 
@@ -56,6 +101,17 @@ export default function wagerMonitorSocket(io) {
           gameId: wager.gameId
         });
       } catch (error) {
+        // Log error with full context
+        logger.error('BET_PLACEMENT_FAILED', {
+          timestamp: new Date().toISOString(),
+          socketId: socket.id,
+          userId: socket.user?.user_id,
+          username: socket.user?.username,
+          error: error.message,
+          errorStack: error.stack,
+          betData
+        });
+
         logger.error('Bet placement failed', { 
           userId,  
           username,

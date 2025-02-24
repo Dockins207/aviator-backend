@@ -500,7 +500,7 @@ export const authService = {
           phone_number: user.phone_number,
           is_active: user.is_active || false
         },
-        process.env.JWT_SECRET || 'your_jwt_secret_here', 
+        process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237', 
         { expiresIn: '7d' }
       );
 
@@ -580,7 +580,7 @@ export const authService = {
 
     try {
       // Verify JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret_here');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237');
       
       return {
         id: decoded.user_id,
@@ -962,7 +962,7 @@ export const authService = {
       // Comprehensive token verification
       const decoded = jwt.verify(
         refreshToken, 
-        process.env.REFRESH_TOKEN_SECRET || 'your_refresh_token_secret'
+        process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237'
       );
 
       // Validate token type and structure
@@ -1008,7 +1008,7 @@ export const authService = {
             username: userProfile.username,
             roles: userProfile.roles || ['user']
           },
-          process.env.JWT_SECRET || 'your_jwt_secret',
+          process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237',
           { 
             expiresIn: '15m' 
           }

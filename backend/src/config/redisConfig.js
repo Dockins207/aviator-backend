@@ -18,8 +18,10 @@ class RedisConnection {
 
   async connect() {
     try {
-      console.log('🔌 Redis Connection Attempt');
-      
+      logger.info('REDIS_CONNECTION_ATTEMPT', {
+        url: process.env.REDIS_URL || 'redis://localhost:6379'
+      });
+
       // Main client
       this.client = createClient({
         url: process.env.REDIS_URL || 'redis://localhost:6379',
@@ -30,46 +32,48 @@ class RedisConnection {
         retry_strategy: (options) => {
           // Exponential backoff retry strategy
           if (options.error && options.error.code === 'ECONNREFUSED') {
-            console.warn('Redis connection refused, retrying...', {
+            logger.error('REDIS_CONNECTION_REFUSED', {
               attempt: options.attempt,
-              totalAttempts: 5
-            });
-            return new Error('Redis connection refused');
-          }
-          
-          if (options.total_retry_time > 1000 * 60 * 5) {
-            console.error('Redis retry time exhausted', {
               totalRetryTime: options.total_retry_time
             });
-            return new Error('Redis retry time exhausted');
+            return Math.min(options.attempt * 100, 3000);
           }
-
-          // Exponential backoff
-          return Math.min(options.attempt * 100, 3000);
+          return undefined;
         }
       });
+
+      // Set up event listeners
+      this.client.on('connect', () => {
+        logger.info('REDIS_CONNECTED');
+      });
+
+      this.client.on('ready', () => {
+        logger.info('REDIS_READY');
+      });
+
+      this.client.on('error', (error) => {
+        logger.error('REDIS_ERROR', {
+          error: error.message,
+          stack: error.stack
+        });
+      });
+
+      this.client.on('end', () => {
+        logger.warn('REDIS_CONNECTION_ENDED');
+      });
+
+      this.client.on('reconnecting', () => {
+        logger.info('REDIS_RECONNECTING');
+      });
+
+      await this.client.connect();
+      logger.info('REDIS_CONNECTION_SUCCESSFUL');
 
       // Pub client
       this.pubClient = this.client.duplicate();
 
       // Sub client
       this.subClient = this.client.duplicate();
-
-      const connectionStart = Date.now();
-
-      // Connect all clients
-      await Promise.all([
-        this.client.connect(),
-        this.pubClient.connect(),
-        this.subClient.connect()
-      ]);
-
-      const connectionDuration = Date.now() - connectionStart;
-
-      console.log('🟢 Redis Connection Successful', {
-        connectionTime: `${connectionDuration}ms`,
-        url: process.env.REDIS_URL || 'redis://localhost:6379'
-      });
 
       // Error handling for each client
       [this.client, this.pubClient, this.subClient].forEach(client => {
@@ -82,25 +86,11 @@ class RedisConnection {
       });
 
       this.resetMetrics();
-
-      return true;
     } catch (error) {
-      console.error('🔴 Redis Connection Failed', {
-        errorName: error.name,
-        errorMessage: error.message,
-        errorCode: error.code,
-        errorStack: error.stack
+      logger.error('REDIS_CONNECTION_FAILED', {
+        error: error.message,
+        stack: error.stack
       });
-
-      // Log detailed error
-      logger.error('REDIS_CONNECTION_CRITICAL_FAILURE', {
-        errorMessage: error.message,
-        errorCode: error.code,
-        errorStack: error.stack,
-        url: process.env.REDIS_URL || 'redis://localhost:6379'
-      });
-
-      // Throw the error instead of returning false
       throw error;
     }
   }

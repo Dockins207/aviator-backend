@@ -1,65 +1,55 @@
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { BetState, GameState } from '../constants/betStates.js';
 import ValidationError from '../utils/validationError.js';
 import notificationService from './notificationService.js';
 import { authService } from './authService.js';
-import betTrackingService from '../redis-services/betTrackingService.js';
 import redisRepository from '../redis-services/redisRepository.js';
 import walletService from './walletService.js';
 import statsService from './statsService.js';
 import wagerMonitorService from './wagerMonitorService.js';
-import gameService from './gameService.js';
 import gameRepository from '../repositories/gameRepository.js';
 import logger from '../config/logger.js';
 import pool from '../config/database.js';
-import { BetState } from '../betEnum.js';
 
 class BetService {
   // Game and Bet State Constants
   static BET_STATES = {
     PLACED: BetState.PLACED,
     ACTIVE: BetState.ACTIVE,
-    COMPLETE: BetState.CASHED_OUT,
-    EXPIRED: BetState.EXPIRED,
-    QUEUED: BetState.QUEUED
+    WON: BetState.WON,
+    LOST: BetState.LOST
   };
 
   static GAME_STATES = {
-    BETTING: 'betting',
-    FLYING: 'flying',
-    CRASHED: 'crashed'
+    BETTING: GameState.BETTING,
+    FLYING: GameState.FLYING,
+    CRASHED: GameState.CRASHED
   };
 
-  constructor(
-    betTrackingService, 
-    redisRepository, 
-    walletService, 
-    notificationService, 
-    authService, 
-    statsService, 
-    wagerMonitorService,
-    gameService,
-    gameRepository
-  ) { 
-    this.betTrackingService = betTrackingService;
-    this.notificationService = notificationService;
-    this.authService = authService;
+  constructor() {
     this.redisRepository = redisRepository;
     this.walletService = walletService;
     this.statsService = statsService;
-    this.wagerMonitorService = wagerMonitorService; 
-    this.gameService = gameService;
+    this.wagerMonitorService = wagerMonitorService;
     this.gameRepository = gameRepository;
+  }
 
-    // Log gameRepository details
-    logger.debug('GameRepository instantiated', { gameRepository });
+  async getGameService() {
+    if (!this._gameService) {
+      const { default: gameService } = await import('./gameService.js');
+      this._gameService = gameService;
+    }
+    return this._gameService;
+  }
 
-    // Add logger for consistent logging
-    this.logger = logger;
-
-    // Assign static constants to instance for easier access
-    this.BET_STATES = BetService.BET_STATES;
-    this.GAME_STATES = BetService.GAME_STATES;
+  // Rest of the class remains the same
+  async getBetTrackingService() {
+    if (!this._betTrackingService) {
+      const { default: betTrackingService } = await import('../redis-services/betTrackingService.js');
+      this._betTrackingService = betTrackingService;
+    }
+    return this._betTrackingService;
   }
 
   /**
@@ -137,7 +127,7 @@ class BetService {
     );
 
     // Get current game session from game service
-    const currentGameSession = await this.gameService.getCurrentGameSession();
+    const currentGameSession = await (await this.getGameService()).getCurrentGameSession();
 
     // Validate session
     if (!currentGameSession || !currentGameSession.id) {
@@ -169,7 +159,7 @@ class BetService {
           id: betId,
           userId: authenticatedUser.user_id,
           amount: validatedBetDetails.amount || validatedBetDetails.betAmount,
-          status: this.betTrackingService.BET_STATES.PLACED,
+          status: (await this.getBetTrackingService()).BET_STATES.PLACED,
           gameSessionId,
           createdAt: new Date().toISOString(),
           userDetails: {
@@ -242,7 +232,7 @@ class BetService {
       }
 
       // Activate bets using bet tracking service with session ID
-      const activationResult = await this.betTrackingService.activateBets(
+      const activationResult = await (await this.getBetTrackingService()).activateBets(
         gameState, 
         currentGameSession.id,  // Pass session ID for strict validation
         gameState.sessionId  // Pass session ID
@@ -275,121 +265,37 @@ class BetService {
    */
   async authenticateUserForBet(betDetails, req = {}) {
     try {
-      // MANDATORY Bet Details Validation
-      if (!betDetails || !betDetails.userId) {
-        logger.error('CRITICAL_BET_DETAILS_VIOLATION', {
-          context: 'authenticateUserForBet',
-          details: 'Missing user ID in bet details',
-          timestamp: new Date().toISOString()
-        });
-        throw new Error('SECURITY_VIOLATION_MISSING_USER_ID');
+      // Log authentication attempt
+      this.logger.info('AUTHENTICATING_USER_FOR_BET', {
+        timestamp: new Date().toISOString(),
+        hasUser: !!req.user,
+        userId: req.user?.user_id
+      });
+
+      // Always use the authenticated user from the request context
+      if (!req.user || !req.user.user_id) {
+        throw new ValidationError('AUTHENTICATION_REQUIRED', 'Valid authentication is required for bet placement');
       }
 
-      // ABSOLUTE Authentication Context Validation
-      const authContexts = [
-        req.user,           // HTTP request user
-        req.socket?.user,   // Socket connection user
-        req.authentication // Additional authentication context
-      ];
-
-      const authenticatedUser = authContexts.find(user => user && user.user_id);
-
-      if (!authenticatedUser) {
-        logger.error('CRITICAL_AUTHENTICATION_CONTEXT_VIOLATION', {
-          context: 'authenticateUserForBet',
-          details: 'No valid authentication context found',
-          timestamp: new Date().toISOString()
-        });
-        throw new Error('SECURITY_VIOLATION_NO_AUTHENTICATION_CONTEXT');
+      // Verify that the user exists and is active
+      const userProfile = await this.authService.getUserProfile(req.user.user_id);
+      if (!userProfile || !userProfile.is_active) {
+        throw new ValidationError('INVALID_USER', 'User not found or inactive');
       }
 
-      // STRICT User ID Verification
-      if (authenticatedUser.user_id !== betDetails.userId) {
-        logger.error('CRITICAL_USER_MISMATCH', {
-          service: 'aviator-backend',
-          requestedUserId: betDetails.userId,
-          authenticatedUserId: authenticatedUser.user_id,
-          context: 'authenticateUserForBet'
-        });
-        throw new Error('SECURITY_VIOLATION_USER_ID_MISMATCH');
-      }
-
-      // COMPREHENSIVE User Profile Validation
-      try {
-        const userProfile = await this.authService.getUserProfile(
-          authenticatedUser.user_id
-        );
-
-        // STRICT Profile Validation
-        if (!userProfile) {
-          logger.error('CRITICAL_USER_PROFILE_NOT_FOUND', {
-            userId: authenticatedUser.user_id,
-            context: 'authenticateUserForBet'
-          });
-          throw new Error('SECURITY_VIOLATION_USER_PROFILE_NOT_FOUND');
+      // Return the authenticated user
+      return {
+        user: {
+          user_id: req.user.user_id,
+          username: req.user.username,
+          role: req.user.role
         }
-
-        // Additional Profile Security Checks
-        const REQUIRED_PROFILE_FIELDS = [
-          'is_active', 
-          'role', 
-          'username', 
-          'wallet.balance'
-        ];
-
-        for (const field of REQUIRED_PROFILE_FIELDS) {
-          const fieldParts = field.split('.');
-          let value = userProfile;
-          
-          for (const part of fieldParts) {
-            value = value?.[part];
-          }
-
-          if (value === undefined || value === null) {
-            logger.error('CRITICAL_USER_PROFILE_FIELD_MISSING', {
-              missingField: field,
-              userId: authenticatedUser.user_id,
-              context: 'authenticateUserForBet'
-            });
-            throw new Error(`SECURITY_VIOLATION_MISSING_PROFILE_FIELD_${field.toUpperCase()}`);
-          }
-        }
-
-        // Verify User Account Status
-        if (!userProfile.is_active) {
-          logger.error('CRITICAL_USER_ACCOUNT_INACTIVE', {
-            userId: authenticatedUser.user_id,
-            context: 'authenticateUserForBet'
-          });
-          throw new Error('SECURITY_VIOLATION_INACTIVE_USER_ACCOUNT');
-        }
-
-        // Log successful authentication with expanded context
-        logger.info('USER_AUTHENTICATION_VERIFIED', {
-          userId: authenticatedUser.user_id,
-          username: userProfile.username,
-          timestamp: new Date().toISOString()
-        });
-
-        return {
-          user: {
-            ...authenticatedUser,
-            ...userProfile
-          }
-        };
-
-      } catch (profileValidationError) {
-        logger.error('CRITICAL_USER_PROFILE_VALIDATION_FAILED', {
-          userId: authenticatedUser.user_id,
-          errorMessage: profileValidationError.message,
-          context: 'authenticateUserForBet'
-        });
-        throw new Error('SECURITY_VIOLATION_USER_PROFILE_VALIDATION_FAILED');
-      }
+      };
     } catch (error) {
-      logger.error('AUTHENTICATION_FAILED', {
-        errorMessage: error.message,
-        context: 'authenticateUserForBet'
+      this.logger.error('AUTHENTICATION_FAILED', {
+        timestamp: new Date().toISOString(),
+        error: error.message,
+        userId: req.user?.user_id
       });
       throw error;
     }
@@ -399,49 +305,33 @@ class BetService {
    * Validate bet details before placement
    * @param {Object} betDetails - Details of the bet to be validated
    * @throws {ValidationError} If bet details are invalid
-   * @returns {Object} Validated user ID and bet amount
+   * @returns {Object} Validated bet amount and auto cashout settings
    */
-  validateBetData(betDetails) {
-    // Log incoming bet details for debugging
-    this.logger.debug('VALIDATING_BET_DETAILS', {
-      service: 'aviator-backend',
-      context: 'validateBetData',
-      betDetailsKeys: Object.keys(betDetails)
-    });
+  async validateBetData(betDetails) {
+    const { amount, autoCashoutEnabled, autoCashoutMultiplier } = betDetails;
 
     // Validate bet amount
-    const betAmount = betDetails.amount || betDetails.betAmount;
-    if (!betAmount || typeof betAmount !== 'number' || betAmount <= 0) {
-      throw new ValidationError('INVALID_BET_AMOUNT', 
-        'Bet amount must be a positive number'
-      );
+    if (!amount || isNaN(amount) || amount <= 0) {
+      throw new ValidationError('INVALID_BET_AMOUNT', {
+        message: 'Bet amount must be a positive number',
+        amount
+      });
     }
 
-    // Validate auto-cashout settings if enabled
-    let autoCashoutEnabled = false;
-    let autoCashoutMultiplier = null;
-
-    if (betDetails.autoCashoutEnabled) {
-      autoCashoutEnabled = true;
-
-      // Validate auto-cashout multiplier if enabled
-      if (typeof betDetails.autoCashoutMultiplier !== 'number' || betDetails.autoCashoutMultiplier <= 1.0) {
-        throw new ValidationError('INVALID_AUTO_CASHOUT_MULTIPLIER', 
-          'Auto-cashout multiplier must be a number greater than 1.0'
-        );
+    // Validate auto cashout settings if enabled
+    if (autoCashoutEnabled) {
+      if (!autoCashoutMultiplier || isNaN(autoCashoutMultiplier) || autoCashoutMultiplier <= 1.0) {
+        throw new ValidationError('INVALID_AUTO_CASHOUT_MULTIPLIER', {
+          message: 'Auto cashout multiplier must be greater than 1.0',
+          autoCashoutMultiplier
+        });
       }
-      autoCashoutMultiplier = betDetails.autoCashoutMultiplier;
     }
 
-    // Return validated bet details
     return {
-      // Only include userId if it exists in betDetails
-      ...(betDetails.userId && { userId: betDetails.userId }),
-      amount: betAmount,
-      autoCashoutEnabled,
-      autoCashoutMultiplier,
-      // Preserve any additional bet details
-      ...betDetails
+      amount: parseFloat(amount),
+      autoCashoutEnabled: !!autoCashoutEnabled,
+      autoCashoutMultiplier: autoCashoutEnabled ? parseFloat(autoCashoutMultiplier) : null
     };
   }
 
@@ -560,511 +450,670 @@ class BetService {
    */
   async placeBet(betDetails, req = {}, cashoutStrategy = 'default') {
     try {
-      // Extract authenticated user context
-      const socketUser = req.socketUser || 
-        (req.socket && req.socket.user) || 
-        (req.user) || 
-        null;
-
-      if (!socketUser) {
-        throw new ValidationError('AUTHENTICATION_REQUIRED', 
-          'Valid authenticated user context is required for bet placement'
-        );
+      // Validate bet details
+      if (!betDetails || typeof betDetails !== 'object') {
+        throw new ValidationError('INVALID_BET_DETAILS', {
+          message: 'Invalid bet details provided'
+        });
       }
 
-      // Extract user ID
-      const userId = socketUser.user_id || 
-        socketUser.userId || 
-        socketUser.id;
-
-      if (!userId) {
-        throw new ValidationError('INVALID_USER_CONTEXT', 
-          'Unable to extract user ID from authentication context'
-        );
+      // Extract amount from either amount or betAmount field
+      const amount = betDetails.amount || betDetails.betAmount;
+      if (!amount || isNaN(amount) || amount <= 0) {
+        throw new ValidationError('INVALID_BET_AMOUNT', {
+          message: 'Invalid bet amount'
+        });
       }
 
-      // Log incoming bet data for debugging
-      this.logger.warn('INCOMING_BET_DATA_DIAGNOSTIC', {
-        service: 'aviator-backend',
-        fullBetData: JSON.stringify(betDetails),
-        betDataKeys: Object.keys(betDetails),
-        socketUserId: userId,
-        socketUsername: socketUser.username,
-        socketId: req.socket?.id
-      });
-
-      // Log raw auto cashout data
-      this.logger.warn('RAW_AUTO_CASHOUT_DATA', {
-        service: 'aviator-backend',
-        rawEnabled: betDetails.autoCashoutEnabled,
-        rawEnabledType: typeof betDetails.autoCashoutEnabled,
-        rawEnabledStringified: JSON.stringify(betDetails.autoCashoutEnabled),
-        rawMultiplier: betDetails.autoCashoutMultiplier,
-        rawMultiplierType: typeof betDetails.autoCashoutMultiplier,
-        fullBetDetails: betDetails
-      });
-
-      // Normalize auto cashout fields
-      const autoCashoutEnabled = Boolean(betDetails.autoCashoutEnabled);
-      const autoCashoutMultiplier = autoCashoutEnabled ? Number(betDetails.autoCashoutMultiplier) : undefined;
-
-      this.logger.warn('AUTO_CASHOUT_VALIDATION', {
-        service: 'aviator-backend',
-        fieldChecks: {
-          hasMultiplier,
-          multiplierValue,
-          autoCashoutEnabled: betDetails.autoCashoutEnabled
-        },
-        valueChecks: {
-          rawMultiplier: betDetails.cashoutMultiplier,
-          rawEnabled: betDetails.autoCashoutEnabled,
-          finalEnabled: autoCashoutEnabled
-        }
-      });
-
-      const validatedBetDetails = {
-        amount: Number(betDetails.amount),
-        userId,
-        autoCashoutEnabled,
-        autoCashoutMultiplier
-      };
-
-      // Validate auto cashout settings if enabled
-      if (validatedBetDetails.autoCashoutEnabled) {
-        if (!validatedBetDetails.autoCashoutMultiplier || validatedBetDetails.autoCashoutMultiplier <= 1.0) {
-          throw new ValidationError('INVALID_AUTO_CASHOUT', 'Auto cashout multiplier must be greater than 1.0');
-        }
+      // Ensure user is authenticated
+      if (!req.user || !req.user.user_id) {
+        throw new ValidationError('AUTHENTICATION_REQUIRED', {
+          message: 'User authentication required'
+        });
       }
 
-      // Log normalized auto cashout data
-      this.logger.warn('NORMALIZED_AUTO_CASHOUT_DATA', {
-        service: 'aviator-backend',
-        normalizedEnabled: validatedBetDetails.autoCashoutEnabled,
-        normalizedEnabledType: typeof validatedBetDetails.autoCashoutEnabled,
-        normalizedMultiplier: validatedBetDetails.autoCashoutMultiplier,
-        normalizedMultiplierType: typeof validatedBetDetails.autoCashoutMultiplier,
-        fullValidatedDetails: validatedBetDetails
-      });
+      // Get current game session
+      const gameService = await this.getGameService();
+      const currentGameSession = gameService.getCurrentGameSession();
+      
+      if (!currentGameSession || !currentGameSession.id) {
+        throw new ValidationError('INVALID_GAME_SESSION', {
+          message: 'No valid game session found'
+        });
+      }
 
-      // Log normalized bet data
-      this.logger.debug('NORMALIZED_BET_DATA', {
-        service: 'aviator-backend',
-        originalBet: betDetails,
-        normalizedBet: validatedBetDetails
-      });
+      // Validate wallet and balance
+      const wallet = await this.walletService.getWallet(req.user.user_id);
+      if (!wallet) {
+        throw new ValidationError('WALLET_NOT_FOUND', {
+          message: 'User wallet not found'
+        });
+      }
 
-      // Get current game state
-      const currentGameSession = await this.gameService.getCurrentGameState();
+      if (wallet.balance < amount) {
+        throw new ValidationError('INSUFFICIENT_BALANCE', {
+          message: 'Insufficient wallet balance'
+        });
+      }
 
-      // Prepare full bet details
-      const fullBetDetails = {
-        ...validatedBetDetails,
-        userId,
-        gameSessionId: currentGameSession.gameId
-      };
+      // Generate bet ID
+      const betId = uuidv4();
 
-      const authenticatedUser = { 
-        user_id: userId,
-        username: socketUser.username || 'Unknown',
-        role: socketUser.role || 'user'
-      };
+      // Determine bet status based on game state
+      let betStatus;
+      let additionalData = {};
 
-      // Ensure bet details has user ID
-      fullBetDetails.userId = authenticatedUser.user_id;
-      fullBetDetails.user = authenticatedUser;
-
-      // Handle bets based on game state
-      switch (currentGameSession.state) {
-        case this.GAME_STATES.BETTING:
-          return await this.placeBetInBettingState(fullBetDetails, authenticatedUser);
-
-        case this.GAME_STATES.FLYING:
-        case this.GAME_STATES.CRASHED:
-          return await this.handleBetInNonBettingState(
-            fullBetDetails, 
-            authenticatedUser, 
-            cashoutStrategy
-          );
-
+      switch (currentGameSession.status) {
+        case GameState.BETTING:
+          betStatus = BetState.ACTIVE;
+          break;
+        case GameState.FLYING:
+        case GameState.CRASHED:
+          betStatus = BetState.PLACED;
+          additionalData.queueReason = currentGameSession.status === GameState.FLYING ? 
+            'GAME_IN_PROGRESS' : 'GAME_CRASHED';
+          break;
         default:
-          throw new ValidationError('INVALID_GAME_STATE', 
-            `Cannot place bets in ${currentGameSession.state} state`
-          );
+          betStatus = BetState.PLACED;
+          additionalData.queueReason = 'UNKNOWN_STATE';
       }
+
+      // Create initial bet state
+      const bet = {
+        id: betId,
+        userId: req.user.user_id,
+        amount: amount,
+        status: betStatus,
+        gameSessionId: currentGameSession.id,
+        createdAt: new Date().toISOString(),
+        autoCashoutAt: betDetails.autoCashoutAt || null,
+        autoRequeue: betDetails.autoRequeue || false,
+        userDetails: {
+          username: req.user.username,
+          role: req.user.role
+        },
+        ...additionalData
+      };
+
+      // Store bet in Redis
+      await this.redisRepository.storeBet(currentGameSession.id, bet);
+
+      // If bet is active, add it to active bets set
+      if (betStatus === BetState.ACTIVE) {
+        await this.redisRepository.addActiveBet(currentGameSession.id, betId);
+      }
+
+      // Update wallet balance
+      await this.walletService.placeBet(req.user.user_id, amount, currentGameSession.id);
+
+      // Log successful bet placement
+      logger.info('BET_PLACED_SUCCESSFULLY', {
+        betId,
+        userId: req.user.user_id,
+        amount,
+        gameSessionId: currentGameSession.id,
+        status: betStatus,
+        gameState: currentGameSession.status
+      });
+
+      return {
+        success: true,
+        betId,
+        status: betStatus,
+        message: betStatus === BetState.ACTIVE ? 
+          'Bet placed and activated successfully' : 
+          'Bet placed and queued for next betting phase'
+      };
+
     } catch (error) {
-      this.logger.error('BET_PLACEMENT_ERROR', {
-        userId,
-        gameState: currentGameSession?.state,
+      // Log the error with full context
+      logger.error('BET_PLACEMENT_ERROR', {
+        errorType: error.constructor.name,
         errorMessage: error.message,
         errorStack: error.stack,
-        betDetails: {
-          amount: betDetails.amount
-        }
+        userId: req?.user?.user_id,
+        betDetails
       });
-      
-      throw error;
+
+      // Format error response
+      const formattedError = {
+        success: false,
+        message: error.message || 'Failed to place bet',
+        code: error.code || 'BET_PLACEMENT_ERROR'
+      };
+
+      // Add status code for HTTP responses
+      if (error instanceof ValidationError) {
+        formattedError.status = 400;
+      } else {
+        formattedError.status = 500;
+      }
+
+      throw formattedError;
     }
   }
 
-  // Helper method to normalize bet details consistently across the service
-  _normalizeBetDetails(betDetails, authenticatedUser, gameSessionId, status = this.BET_STATES.PLACED) {
-    // Log incoming auto cashout data
-    this.logger.debug('NORMALIZE_INCOMING_AUTO_CASHOUT', {
-      service: 'aviator-backend',
-      rawEnabled: betDetails.autoCashoutEnabled,
-      rawEnabledType: typeof betDetails.autoCashoutEnabled,
-      rawMultiplier: betDetails.autoCashoutMultiplier,
-      rawMultiplierType: typeof betDetails.autoCashoutMultiplier
-    });
-
-    // Normalize auto cashout fields
-    const autoCashoutEnabled = Boolean(betDetails.autoCashoutEnabled);
-    let autoCashoutMultiplier = undefined;
-    
-    if (autoCashoutEnabled) {
-      autoCashoutMultiplier = Number(betDetails.autoCashoutMultiplier);
-      // Validate multiplier when auto cashout is enabled
-      if (!autoCashoutMultiplier || autoCashoutMultiplier <= 1.0) {
-        throw new ValidationError('INVALID_AUTO_CASHOUT', 'Auto cashout multiplier must be greater than 1.0');
-      }
+  /**
+   * Helper method to normalize bet details consistently across the service
+   * @param {Object} betDetails - Bet details to normalize
+   * @param {Object} authenticatedUser - Authenticated user details
+   * @param {string} gameSessionId - Game session ID
+   * @param {string} [status] - Optional bet status
+   * @returns {Object} Normalized bet details
+   */
+  async _normalizeBetDetails(betDetails, authenticatedUser, gameSessionId, status) {
+    // Get default status if not provided
+    if (!status) {
+      const betTrackingService = await this.getBetTrackingService();
+      status = betTrackingService.BET_STATES.PLACED;
     }
 
-    // Log normalized auto cashout data
-    this.logger.debug('NORMALIZE_FINAL_AUTO_CASHOUT', {
-      service: 'aviator-backend',
-      normalizedEnabled: autoCashoutEnabled,
-      normalizedEnabledType: typeof autoCashoutEnabled,
-      normalizedMultiplier: autoCashoutMultiplier,
-      normalizedMultiplierType: typeof autoCashoutMultiplier
-    });
-    
-    this.logger.debug('NORMALIZING_BET_DETAILS', {
-      service: 'aviator-backend',
-      betId: betDetails.id,
-      userId: authenticatedUser.user_id,
-      autoCashoutEnabled,
-      autoCashoutMultiplier,
-      gameSessionId
-    });
-
+    // Always use the authenticated user's ID
     return {
-      id: betDetails.id || uuidv4(),
+      id: uuidv4(),
       userId: authenticatedUser.user_id,
-      username: authenticatedUser.username || 'Unknown',
-      role: authenticatedUser.role || 'user',
-      amount: parseFloat(betDetails.amount),
-      autoCashoutEnabled,
-      autoCashoutMultiplier,
-      gameSessionId,
+      amount: betDetails.amount,
       status,
-      createdAt: new Date().toISOString()
+      gameSessionId,
+      createdAt: new Date().toISOString(),
+      userDetails: {
+        username: authenticatedUser.username
+      }
     };
   }
 
   async handleBetInNonBettingState(betDetails, authenticatedUser, cashoutStrategy = 'default') {
+    const gameState = await (await this.getGameService()).getCurrentGameState();
+    const betId = uuidv4();
+    
+    const normalizedBet = await this._normalizeBetDetails(
+      betDetails,
+      authenticatedUser,
+      gameState.gameId,
+      (await this.getBetTrackingService()).BET_STATES.QUEUED
+    );
+
     try {
-      // Get current game state with strict validation
-      const currentGameSession = await this.gameService.getCurrentGameState();
-      
-      // Log game state for debugging
-      this.logger.debug('CURRENT_GAME_STATE', {
-        service: 'aviator-backend',
-        gameState: currentGameSession.state,
-        gameId: currentGameSession.gameId,
-        timestamp: new Date().toISOString()
-      });
+      // Deduct amount from wallet
+      await this.walletService.deductAmount(
+        authenticatedUser.user_id,
+        betDetails.amount,
+        'BET_PLACEMENT'
+      );
 
-      // Validate game state allows queueing
-      if (!currentGameSession || 
-          ![this.GAME_STATES.FLYING, this.GAME_STATES.CRASHED].includes(currentGameSession.state)) {
-        throw new ValidationError('INVALID_GAME_STATE', 
-          `Cannot queue bets in ${currentGameSession?.state || 'unknown'} state`
-        );
-      }
+      // Store queued bet
+      const queuedBet = await this.storeBet(normalizedBet, true);
+      await this.redisRepository.sadd(
+        `game:${gameState.gameId}:queuedBets`,
+        betId
+      );
 
-      // Validate wallet balance before proceeding
-      const currentBalance = await this.walletService.getWalletBalance(authenticatedUser.user_id);
-      if (currentBalance < betDetails.amount) {
-        throw new ValidationError('INSUFFICIENT_BALANCE', {
-          message: 'Insufficient wallet balance for bet',
-          currentBalance,
-          requiredAmount: betDetails.amount
-        });
-      }
-
-      // Log bet queueing attempt
-      this.logger.info('QUEUEING_BET_FOR_NEXT_SESSION', {
-        userId: authenticatedUser.user_id,
-        gameState: currentGameSession.state,
-        gameId: currentGameSession.gameId,
-        betAmount: betDetails.amount,
-        cashoutStrategy
-      });
-
-      try {
-        // Use normalized bet details
-        const normalizedBet = this._normalizeBetDetails(betDetails, authenticatedUser, currentGameSession.gameId, this.BET_STATES.QUEUED);
-        const queuedBet = {
-          ...normalizedBet,
-          state: this.BET_STATES.QUEUED,
-          queuedAt: Date.now(),
-          cashoutStrategy
-        };
-
-        this.logger.debug('PROCESSING_QUEUED_BET', {
-          betId: queuedBet.id,
-          queuedBet
-        });
-
-        // Queue bet for next session using the dedicated method
-        const queueResult = await this.redisRepository.queueBetForNextSession(
-          queuedBet,
-          currentGameSession.gameId
-        );
-
-        // If Redis operations succeed, deduct wallet
-        await this.walletService.deductWalletBalance(
-          authenticatedUser.user_id, 
-          betDetails.amount
-        );
-
-        this.logger.info('BET_QUEUED_SUCCESSFULLY', {
-          betId: queueResult.betId,
-          userId: authenticatedUser.user_id,
-          gameState: currentGameSession.state,
-          queuedAt: queueResult.queuedAt,
-          sessionId: queueResult.sessionId
-        });
-
-        return {
-          ...queuedBet,
-          id: queueResult.betId,
-          queuedAt: queueResult.queuedAt
-        };
-      } catch (error) {
-        // Log queueing failure with detailed error info
-        this.logger.error('BET_QUEUEING_FAILED', {
-          userId: authenticatedUser.user_id,
-          error: error.message,
-          stack: error.stack,
-          timestamp: new Date().toISOString()
-        });
-
-        throw error;
-      }
+      return {
+        ...queuedBet,
+        status: 'queued',
+        message: 'Bet queued for next betting phase'
+      };
     } catch (error) {
-      // Log error with detailed context
-      this.logger.error('BET_QUEUEING_ERROR', {
-        userId: authenticatedUser.user_id,
-        gameState: currentGameSession?.state,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        betDetails: {
-          amount: betDetails.amount
-        }
+      this.logger.error('BET_QUEUING_FAILED', {
+        error: error.message,
+        betId,
+        userId: authenticatedUser.user_id
       });
-      
       throw error;
     }
   }
 
   async placeBetInBettingState(betDetails, authenticatedUser) {
+    const gameState = await (await this.getGameService()).getCurrentGameState();
+    const betId = uuidv4();
+    
+    const normalizedBet = await this._normalizeBetDetails(
+      betDetails,
+      authenticatedUser,
+      gameState.gameId,
+      (await this.getBetTrackingService()).BET_STATES.PLACED
+    );
+
     try {
-      // Get current game state
-      const currentGameState = await this.gameService.getCurrentGameState();
-      
-      // Determine initial bet state based on game state
-      let initialBetState;
-      if (currentGameState.status === this.GAME_STATES.BETTING) {
-        initialBetState = this.BET_STATES.PLACED;
-      } else {
-        initialBetState = this.BET_STATES.QUEUED;
+      // Deduct amount and store bet
+      await this.walletService.deductAmount(
+        authenticatedUser.user_id,
+        betDetails.amount,
+        'BET_PLACEMENT'
+      );
+
+      const placedBet = await this.storeBet(normalizedBet);
+      await this.redisRepository.sadd(
+        `game:${gameState.gameId}:activeBets`,
+        betId
+      );
+
+      // Setup auto cashout if enabled
+      if (betDetails.autoCashoutEnabled && betDetails.autoCashoutMultiplier) {
+        await this.redisRepository.hset(
+          `bet:${betId}:autoCashout`,
+          {
+            multiplier: betDetails.autoCashoutMultiplier,
+            enabled: true
+          }
+        );
       }
 
-      // Prepare bet with correct state
-      const bet = {
-        ...betDetails,
-        status: initialBetState,
-        gameSessionId: currentGameState.gameId, // Always assign current session ID
-        userId: authenticatedUser.user_id,
-        createdAt: new Date().toISOString()
+      return {
+        ...placedBet,
+        status: 'placed',
+        message: 'Bet placed successfully'
+      };
+    } catch (error) {
+      this.logger.error('BET_PLACEMENT_FAILED', {
+        error: error.message,
+        betId,
+        userId: authenticatedUser.user_id
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process wallet transaction for bet or cashout
+   * @param {string} userId - User ID
+   * @param {number} amount - Transaction amount
+   * @param {string} type - Transaction type (debit/credit)
+   * @param {string} betId - Associated bet ID
+   * @private
+   */
+  async _processWalletTransaction(userId, amount, type, betId) {
+    try {
+      const transaction = {
+        userId,
+        amount,
+        type,
+        betId,
+        timestamp: Date.now(),
+        status: 'pending'
       };
 
-      // Store bet with appropriate state
-      return await this.betTrackingService.storeBet(currentGameState.gameId, bet);
+      // Store transaction record
+      const transactionId = await this.redisRepository.incr('transaction:id');
+      await this.redisRepository.hmset(
+        `transaction:${transactionId}`,
+        transaction
+      );
+
+      // Update wallet balance
+      const walletKey = `wallet:${userId}`;
+      const pipeline = this.redisRepository.pipeline();
+
+      // Lock wallet for atomic operation
+      pipeline.watch(walletKey);
+
+      const currentBalance = parseFloat(await this.redisRepository.hget(walletKey, 'balance') || '0');
+      let newBalance;
+
+      if (type === 'debit') {
+        if (currentBalance < amount) {
+          throw new ValidationError('INSUFFICIENT_BALANCE', 'Insufficient wallet balance');
+        }
+        newBalance = currentBalance - amount;
+      } else {
+        newBalance = currentBalance + amount;
+      }
+
+      // Update balance and record transaction
+      pipeline.hset(walletKey, 'balance', newBalance.toString());
+      pipeline.sadd(`wallet:${userId}:transactions`, transactionId);
+      
+      // Update transaction status
+      pipeline.hset(`transaction:${transactionId}`, 'status', 'completed');
+
+      await pipeline.exec();
+
+      // Emit wallet update event
+      this.io.to(userId).emit('walletUpdate', {
+        balance: newBalance,
+        transaction: {
+          id: transactionId,
+          type,
+          amount,
+          timestamp: transaction.timestamp
+        }
+      });
+
+      return { transactionId, newBalance };
     } catch (error) {
-      logger.error('PLACE_BET_ERROR', {
-        error: error.message,
-        userId: authenticatedUser?.user_id,
-        betDetails
+      this.logger.error('WALLET_TRANSACTION_FAILED', {
+        userId,
+        amount,
+        type,
+        betId,
+        error: error.message
       });
       throw error;
     }
   }
 
-  async placeBetInBettingState(betDetails, authenticatedUser) {
-    let transactionSuccessful = false;
-    let walletUpdated = false;
-    let betStored = false;
-    let betId = null;
-
+  /**
+   * Process cashout with wallet update
+   */
+  async processCashout(req, multiplier, isAutoCashout = false) {
+    const userId = req.user.user_id;
+    const gameState = await (await this.getGameService()).getCurrentGameState();
+    
     try {
-      // Get current game state with strict validation
-      const currentGameSession = await this.gameService.getCurrentGameState();
-      
-      // Log game state for debugging
-      this.logger.debug('CURRENT_GAME_STATE', {
-        service: 'aviator-backend',
-        gameState: currentGameSession.state,
-        gameId: currentGameSession.gameId,
-        timestamp: new Date().toISOString()
-      });
-
-      // Double-check game state before proceeding
-      if (currentGameSession.state !== this.GAME_STATES.BETTING) {
-        this.logger.warn('GAME_STATE_CHANGED_DURING_BET', {
-          expectedState: this.GAME_STATES.BETTING,
-          actualState: currentGameSession.state,
-          gameId: currentGameSession.gameId
-        });
-        return await this.handleBetInNonBettingState(betDetails, authenticatedUser);
+      // Validate game state and get bet
+      if (gameState.status !== this.GAME_STATES.FLYING) {
+        throw new ValidationError('INVALID_GAME_STATE', 'Game is not in flying state');
       }
 
-      // Use normalized bet details
-      const normalizedBetDetails = this._normalizeBetDetails(betDetails, authenticatedUser, currentGameSession.gameId, this.BET_STATES.PLACED);
-      
-      this.logger.debug('AUTO_CASHOUT_FIELDS', {
-        received: betDetails,
-        normalized: {
-          autoCashoutEnabled: normalizedBetDetails.autoCashoutEnabled,
-          autoCashoutMultiplier: normalizedBetDetails.autoCashoutMultiplier
-        }
-      });
+      const bet = await this.findActiveBet(userId);
+      await this.validateBetForCashout(bet, gameState, userId);
 
-      this.logger.debug('PROCESSING_BET_PLACEMENT', {
-        betId: normalizedBetDetails.id,
-        normalizedBetDetails
-      });
+      // Calculate winnings
+      const winnings = parseFloat((bet.amount * multiplier).toFixed(2));
 
-      // Step 1: Validate wallet balance before proceeding
-      const currentBalance = await this.walletService.getWalletBalance(authenticatedUser.user_id);
-      if (currentBalance < betDetails.amount) {
-        throw new ValidationError('INSUFFICIENT_BALANCE', {
-          message: 'Insufficient wallet balance for bet',
-          currentBalance,
-          requiredAmount: betDetails.amount
-        });
-      }
-
-      // Step 2: Deduct wallet balance first (this is atomic and will rollback if failed)
-      await this.walletService.deductWalletBalance(
-        authenticatedUser.user_id, 
-        betDetails.amount
+      // Process wallet credit
+      await this._processWalletTransaction(
+        userId,
+        winnings,
+        'credit',
+        bet.id
       );
-      walletUpdated = true;
 
-      // Step 3: Store bet as ACTIVE immediately in betting state
-      try {
-        // Use normalized bet details with active state
-        const activeBet = {
-          ...normalizedBetDetails,
-          state: 'active',
-          activatedAt: Date.now()
-        };
-        
-        this.logger.debug('STORING_ACTIVE_BET', {
-          betId: activeBet.id,
-          activeBet,
-          gameId: currentGameSession.gameId
-        });
-
-        // Store bet in Redis first
-        await this.redisRepository.hset(`bet:${activeBet.id}`, activeBet);
-        await this.redisRepository.sadd(`game:${currentGameSession.gameId}:activeBets`, activeBet.id);
-        betStored = true;
-        
-        this.logger.info('BET_PLACED_AND_ACTIVATED', {
-          betId: activeBet.id,
-          userId: authenticatedUser.user_id,
-          amount: betDetails.amount,
-          gameId: currentGameSession.gameId,
-          autoCashoutEnabled: activeBet.autoCashoutEnabled,
-          autoCashoutMultiplier: activeBet.autoCashoutMultiplier
-        });
-        
-        return activeBet;
-        
-      } catch (storageError) {
-        this.logger.error('BET_STORAGE_FAILED', {
-          error: storageError.message,
-          stack: storageError.stack,
-          betId: normalizedBetDetails?.id,
-          userId: authenticatedUser.user_id,
-          gameId: currentGameSession.gameId
-        });
-        // If storage fails, refund the wallet
-        try {
-          await this.walletService.creditWalletBalance(
-            authenticatedUser.user_id,
-            betDetails.amount,
-            'Bet storage failed - automatic refund'
-          );
-          this.logger.info('WALLET_REFUNDED_AFTER_STORAGE_FAILURE', {
-            userId: authenticatedUser.user_id,
-            betId: normalizedBetDetails?.id,
-            amount: betDetails.amount,
-            gameId: currentGameSession.gameId
-          });
-        } catch (refundError) {
-          this.logger.error('WALLET_REFUND_FAILED', {
-            userId: authenticatedUser.user_id,
-            betId: normalizedBetDetails?.id,
-            amount: betDetails.amount,
-            gameId: currentGameSession.gameId,
-            error: refundError.message
-          });
-        }
-        throw new Error('Failed to store bet - wallet refunded');
-      }
-
-      // This line should never be reached as we return inside the try block
-      throw new Error('Unexpected code path in bet placement');
-
-    } catch (error) {
-      this.logger.error('BET_PLACEMENT_ERROR', {
-        userId: authenticatedUser.user_id,
-        betId,
-        walletUpdated,
-        betStored,
-        error: error.message,
-        stack: error.stack
+      // Update bet status
+      await this.redisRepository.hmset(`bet:${bet.id}`, {
+        status: (await this.getBetTrackingService()).BET_STATES.WON,
+        cashoutMultiplier: multiplier,
+        winnings,
+        cashedOutAt: Date.now()
       });
 
-      // Attempt to rollback changes if needed
-      if (walletUpdated && !betStored) {
+      // Remove from active bets
+      await this.redisRepository.srem(
+        `game:${gameState.gameId}:activeBets`,
+        bet.id
+      );
+
+      // Stop auto cashout monitoring if enabled
+      if (bet.autoCashoutEnabled) {
+        await this._stopAutoCashoutMonitoring(gameState.gameId, bet.id);
+      }
+
+      return {
+        success: true,
+        betId: bet.id,
+        multiplier,
+        winnings,
+        isAutoCashout
+      };
+    } catch (error) {
+      this.logger.error('CASHOUT_FAILED', {
+        userId,
+        multiplier,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process queued bets for a new game session
+   */
+  async processQueuedBets(newGameSessionId) {
+    try {
+      const queuedBetIds = await this.redisRepository.smembers('queuedBets');
+      const results = {
+        processed: 0,
+        failed: 0,
+        errors: []
+      };
+
+      for (const betId of queuedBetIds) {
         try {
-          // Refund the wallet if we deducted but failed to store bet
-          await this.walletService.creditWalletBalance(
-            authenticatedUser.user_id,
-            betDetails.amount,
-            'Bet placement rollback'
+          const queuedBet = await this.redisRepository.hgetall(`bet:${betId}`);
+          if (!queuedBet || !queuedBet.userId) continue;
+
+          // Activate bet in new session
+          const normalizedBet = {
+            ...queuedBet,
+            gameId: newGameSessionId,
+            status: (await this.getBetTrackingService()).BET_STATES.PLACED,
+            queuedAt: null,
+            placedAt: Date.now()
+          };
+
+          await this.storeBet(normalizedBet);
+          await this.redisRepository.sadd(
+            `game:${newGameSessionId}:activeBets`,
+            betId
           );
-          this.logger.info('WALLET_ROLLBACK_SUCCESSFUL', {
-            userId: authenticatedUser.user_id,
-            betId,
-            amount: betDetails.amount
-          });
-        } catch (rollbackError) {
-          this.logger.error('WALLET_ROLLBACK_FAILED', {
-            userId: authenticatedUser.user_id,
-            betId,
-            amount: betDetails.amount,
-            error: rollbackError.message
-          });
+          await this.redisRepository.srem('queuedBets', betId);
+          
+          results.processed++;
+        } catch (error) {
+          results.failed++;
+          results.errors.push({ betId, error: error.message });
         }
       }
 
+      return results;
+    } catch (error) {
+      this.logger.error('QUEUED_BETS_PROCESSING_FAILED', {
+        error: error.message,
+        newGameSessionId
+      });
       throw error;
+    }
+  }
+
+  /**
+   * Retrieve wallet ID for a given user
+   * @param {string} userId - User identifier
+   * @returns {Promise<string>} Wallet ID
+   */
+  async _getWalletIdForUser(userId) {
+    try {
+      const walletQuery = `
+        SELECT wallet_id 
+        FROM wallets 
+        WHERE user_id = $1
+      `;
+      const walletResult = await pool.query(walletQuery, [userId]);
+
+      if (walletResult.rows.length === 0) {
+        throw new ValidationError('WALLET_NOT_FOUND', {
+          message: 'User wallet does not exist',
+          userId
+        });
+      }
+
+      return walletResult.rows[0].wallet_id;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Handle game crash and manage affected bets
+   */
+  async handleGameCrash(gameId, crashPoint) {
+    try {
+      const activeBetIds = await this.redisRepository.smembers(
+        `game:${gameId}:activeBets`
+      );
+
+      const results = {
+        expired: 0,
+        queued: 0,
+        errors: []
+      };
+
+      for (const betId of activeBetIds) {
+        try {
+          const bet = await this.redisRepository.hgetall(`bet:${betId}`);
+          
+          // Mark bet as expired
+          await this.redisRepository.hset(`bet:${betId}`, {
+            status: (await this.getBetTrackingService()).BET_STATES.LOST,
+            crashPoint,
+            expiredAt: Date.now()
+          });
+
+          // Queue for next session if auto-requeue is enabled
+          if (bet.autoRequeue) {
+            const queuedBet = {
+              ...bet,
+              status: (await this.getBetTrackingService()).BET_STATES.QUEUED,
+              queuedAt: Date.now(),
+              previousGameId: gameId
+            };
+
+            await this.storeBet(queuedBet, true);
+            results.queued++;
+          } else {
+            results.expired++;
+          }
+
+          // Remove from active bets
+          await this.redisRepository.srem(
+            `game:${gameId}:activeBets`,
+            betId
+          );
+
+        } catch (error) {
+          results.errors.push({ betId, error: error.message });
+        }
+      }
+
+      // Stop auto cashout monitoring
+      await this._stopAutoCashoutMonitoring(gameId);
+
+      return results;
+    } catch (error) {
+      this.logger.error('GAME_CRASH_HANDLING_FAILED', {
+        gameId,
+        crashPoint,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Transfer queued bets to a new session
+   */
+  async transferQueuedBetsToNewSession(newGameSessionId) {
+    try {
+      const queuedBetIds = await this.redisRepository.smembers('queuedBets');
+      
+      const results = {
+        transferred: 0,
+        failed: 0,
+        errors: []
+      };
+
+      for (const betId of queuedBetIds) {
+        try {
+          const bet = await this.redisRepository.hgetall(`bet:${betId}`);
+          
+          // Update bet with new session ID
+          await this.redisRepository.hset(`bet:${betId}`, {
+            gameId: newGameSessionId,
+            transferredAt: Date.now()
+          });
+
+          // Add to new session's queued bets
+          await this.redisRepository.sadd(
+            `game:${newGameSessionId}:queuedBets`,
+            betId
+          );
+
+          results.transferred++;
+        } catch (error) {
+          results.failed++;
+          results.errors.push({ betId, error: error.message });
+        }
+      }
+
+      return results;
+    } catch (error) {
+      this.logger.error('QUEUED_BETS_TRANSFER_FAILED', {
+        error: error.message,
+        newGameSessionId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Queue cashout for next session
+   */
+  async queueCashoutForNextSession(betId, userId, targetMultiplier) {
+    try {
+      const bet = await this.redisRepository.hgetall(`bet:${betId}`);
+      
+      if (bet.userId !== userId) {
+        throw new ValidationError('UNAUTHORIZED_CASHOUT', 'Not authorized to queue cashout for this bet');
+      }
+
+      await this.redisRepository.hset(`bet:${betId}:autoCashout`, {
+        enabled: true,
+        multiplier: targetMultiplier,
+        queuedAt: Date.now()
+      });
+
+      this.logger.info('CASHOUT_QUEUED', {
+        betId,
+        userId,
+        targetMultiplier
+      });
+
+      return {
+        success: true,
+        message: 'Cashout queued for next session'
+      };
+    } catch (error) {
+      this.logger.error('CASHOUT_QUEUE_FAILED', {
+        error: error.message,
+        betId,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Check auto cashouts
+   * @param {string} gameId - Game ID
+   * @param {number} currentMultiplier - Current multiplier
+   */
+  async checkAutoCashouts(gameId, currentMultiplier) {
+    const monitoringContexts = await this.redisRepository.hgetall(
+      `game:${gameId}:autoCashoutMonitoring`
+    );
+
+    for (const [betId, contextStr] of Object.entries(monitoringContexts)) {
+      const context = JSON.parse(contextStr);
+      
+      if (currentMultiplier >= context.targetMultiplier) {
+        try {
+          await this.processCashout(
+            { user: { user_id: context.userId } },
+            currentMultiplier,
+            true
+          );
+
+          await this.redisRepository.hdel(
+            `game:${gameId}:autoCashoutMonitoring`,
+            betId
+          );
+        } catch (error) {
+          this.logger.error('AUTO_CASHOUT_FAILED', {
+            error: error.message,
+            betId,
+            userId: context.userId
+          });
+        }
+      }
     }
   }
 
@@ -1075,39 +1124,78 @@ class BetService {
    * @returns {Promise<Object>} State transition results
    */
   async handleGameStateTransition(gameId, newState) {
-    try {
-      this.logger.info('GAME_STATE_TRANSITION', {
-        gameId,
-        newState,
-        timestamp: new Date().toISOString()
-      });
+    this.logger.info('GAME_STATE_TRANSITION', {
+      gameId,
+      newState,
+      timestamp: new Date().toISOString()
+    });
 
-      switch (newState) {
-        case this.GAME_STATES.BETTING:
-          return await this.handleBettingStateStart(gameId);
-        
-        case this.GAME_STATES.FLYING:
-          return await this.handleFlyingStateStart(gameId);
-        
-        case this.GAME_STATES.CRASHED:
-          return await this.handleGameCrash(gameId);
-        
-        default:
-          this.logger.warn('UNHANDLED_GAME_STATE', {
-            gameId,
-            state: newState
-          });
-          return { handled: false, state: newState };
-      }
-    } catch (error) {
-      this.logger.error('GAME_STATE_TRANSITION_ERROR', {
-        gameId,
-        newState,
-        error: error.message,
-        stack: error.stack
-      });
-      throw error;
+    if (newState === this.GAME_STATES.FLYING) {
+      // Start monitoring multiplier for auto cashouts
+      this._startAutoCashoutMonitoring(gameId);
+    } else if (newState === this.GAME_STATES.CRASHED) {
+      // Clean up auto cashout monitoring
+      this._stopAutoCashoutMonitoring(gameId);
     }
+
+    return { success: true, gameId, newState };
+  }
+
+  _stopAutoCashoutMonitoring(gameId) {
+    if (this._autoCashoutIntervals?.has(gameId)) {
+      clearInterval(this._autoCashoutIntervals.get(gameId));
+      this._autoCashoutIntervals.delete(gameId);
+    }
+  }
+
+  async _startAutoCashoutMonitoring(gameId) {
+    // Clean up any existing interval for this game
+    this._stopAutoCashoutMonitoring(gameId);
+
+    const checkInterval = setInterval(async () => {
+      try {
+        const gameState = await (await this.getGameService()).getCurrentGameState();
+        
+        // Stop monitoring if game is no longer flying
+        if (gameState.state !== this.GAME_STATES.FLYING) {
+          this._stopAutoCashoutMonitoring(gameId);
+          return;
+        }
+
+        const currentMultiplier = gameState.multiplier;
+        const activeBetIds = await this.redisRepository.smembers(`game:${gameId}:activeBets`);
+
+        // Process auto cashouts
+        for (const betId of activeBetIds) {
+          try {
+            const bet = await this.redisRepository.hgetall(`bet:${betId}`);
+            
+            if (bet.autoCashoutEnabled && parseFloat(bet.autoCashoutMultiplier) <= currentMultiplier) {
+              // Create a mock request object for processCashout
+              const mockReq = { user: { user_id: bet.userId } };
+              await this.processCashout(mockReq, currentMultiplier, true);
+            }
+          } catch (error) {
+            this.logger.error('AUTO_CASHOUT_PROCESSING_ERROR', {
+              betId,
+              gameId,
+              multiplier: currentMultiplier,
+              error: error.message
+            });
+          }
+        }
+      } catch (error) {
+        this.logger.error('AUTO_CASHOUT_MONITORING_ERROR', {
+          gameId,
+          error: error.message,
+          stack: error.stack
+        });
+      }
+    }, 100); // Check every 100ms
+
+    // Store the interval for cleanup
+    this._autoCashoutIntervals = this._autoCashoutIntervals || new Map();
+    this._autoCashoutIntervals.set(gameId, checkInterval);
   }
 
   /**
@@ -1207,6 +1295,48 @@ class BetService {
   }
 
   /**
+   * Handle game state transitions and manage bet states
+   * @param {string} gameId - Game session identifier
+   * @param {string} newState - New game state
+   * @returns {Promise<Object>} State transition results
+   */
+  async handleGameStateTransition(gameId, newState) {
+    try {
+      this.logger.info('GAME_STATE_TRANSITION', {
+        gameId,
+        newState,
+        timestamp: new Date().toISOString()
+      });
+
+      switch (newState) {
+        case this.GAME_STATES.BETTING:
+          return await this.handleBettingStateStart(gameId);
+        
+        case this.GAME_STATES.FLYING:
+          return await this.handleFlyingStateStart(gameId);
+        
+        case this.GAME_STATES.CRASHED:
+          return await this.handleGameCrash(gameId);
+        
+        default:
+          this.logger.warn('UNHANDLED_GAME_STATE', {
+            gameId,
+            state: newState
+          });
+          return { handled: false, state: newState };
+      }
+    } catch (error) {
+      this.logger.error('GAME_STATE_TRANSITION_ERROR', {
+        gameId,
+        newState,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Method to store a bet (normal or queued)
    * @param {Object} betDetails - Bet details
    * @param {Boolean} isQueued - Whether the bet is queued or not
@@ -1250,13 +1380,4 @@ class BetService {
   }
 }
 
-export default new BetService(
-  betTrackingService,
-  redisRepository,
-  walletService,
-  notificationService,
-  authService,
-  statsService,
-  wagerMonitorService,
-  gameService,
-  gameRepository);
+export default new BetService();

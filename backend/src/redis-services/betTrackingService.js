@@ -1,9 +1,7 @@
 import logger from '../config/logger.js';
 import redisRepository from './redisRepository.js';
 import { v4 as uuidv4 } from 'uuid';
-import gameService from '../services/gameService.js';
 import { EventEmitter } from 'events';
-import { BetState } from '../betEnum.js';
 
 class BetTrackingService extends EventEmitter {
   constructor(redisRepository) {
@@ -14,18 +12,18 @@ class BetTrackingService extends EventEmitter {
     this.redisRepository = redisRepository;
 
     // Define comprehensive bet states with explicit lifecycle
-    this.BET_STATES = BetState;
+    this.BET_STATES = {
+      PLACED: 'PLACED',
+      ACTIVE: 'ACTIVE',
+      WON: 'WON',
+      LOST: 'LOST'
+    };
 
     // Define game states to match game service
     this.GAME_STATES = {
-      // Game is in betting phase
-      BETTING: 'betting',   
-      
-      // Game is in flying state
-      FLYING: 'flying',     
-      
-      // Game has crashed
-      CRASHED: 'crashed'    
+      BETTING: 'BETTING',
+      FLYING: 'FLYING',
+      CRASHED: 'CRASHED'
     };
 
     // Current game state tracking
@@ -36,6 +34,14 @@ class BetTrackingService extends EventEmitter {
 
     // Persistent game session ID for the current game lifecycle
     this.currentGameSessionId = null;
+  }
+
+  async getGameService() {
+    if (!this._gameService) {
+      const { default: gameService } = await import('../services/gameService.js');
+      this._gameService = gameService;
+    }
+    return this._gameService;
   }
 
   /**
@@ -54,7 +60,7 @@ class BetTrackingService extends EventEmitter {
       }
 
       // Get current game state
-      const currentGameState = await gameService.getCurrentGameState();
+      const currentGameState = await (await this.getGameService()).getCurrentGameState();
 
       // Get existing bet
       const existingBet = await this.redisRepository.getBetById(gameSessionId, betId);
@@ -67,11 +73,10 @@ class BetTrackingService extends EventEmitter {
 
       // Define state transition rules
       const validTransitions = {
-        [this.BET_STATES.PLACED]: [this.BET_STATES.ACTIVE, this.BET_STATES.EXPIRED],
-        [this.BET_STATES.QUEUED]: [this.BET_STATES.ACTIVE, this.BET_STATES.EXPIRED],
-        [this.BET_STATES.ACTIVE]: [this.BET_STATES.COMPLETE, this.BET_STATES.EXPIRED],
-        [this.BET_STATES.COMPLETE]: [], // Terminal state
-        [this.BET_STATES.EXPIRED]: [], // Terminal state,
+        [this.BET_STATES.PLACED]: [this.BET_STATES.ACTIVE],
+        [this.BET_STATES.ACTIVE]: [this.BET_STATES.WON, this.BET_STATES.LOST],
+        [this.BET_STATES.WON]: [], // Terminal state
+        [this.BET_STATES.LOST]: [] // Terminal state,
       };
 
       // Validate transition
@@ -243,7 +248,7 @@ class BetTrackingService extends EventEmitter {
    */
   async cashoutBet(betId, gameSessionId, cashoutMultiplier, options = {}) {
     try {
-      const currentGameServiceSessionId = gameService.gameState.gameId;
+      const currentGameServiceSessionId = (await this.getGameService()).gameState.gameId;
 
       // ABSOLUTE STRICT session ID validation
       if (!gameSessionId || gameSessionId !== currentGameServiceSessionId) {
@@ -314,7 +319,7 @@ class BetTrackingService extends EventEmitter {
         originalAmount: betDetails.amount,
         cashoutMultiplier,
         payoutAmount: potentialPayout,
-        status: this.BET_STATES.COMPLETE,
+        status: this.BET_STATES.WON,
         cashoutTimestamp: new Date().toISOString(),
         ...options
       };
@@ -323,7 +328,7 @@ class BetTrackingService extends EventEmitter {
       const updatedBet = await this.redisRepository.updateBetStatus(
         gameSessionId, 
         betId, 
-        this.BET_STATES.COMPLETE,
+        this.BET_STATES.WON,
         cashoutDetails
       );
 
@@ -373,7 +378,7 @@ class BetTrackingService extends EventEmitter {
     return this.transitionBetState(
       betId, 
       gameSessionId, 
-      this.BET_STATES.COMPLETE,
+      isWin ? this.BET_STATES.WON : this.BET_STATES.LOST,
       { 
         finalMultiplier,
         result: isWin ? 'win' : 'loss'
@@ -392,7 +397,7 @@ class BetTrackingService extends EventEmitter {
     return this.transitionBetState(
       betId, 
       gameSessionId, 
-      this.BET_STATES.EXPIRED,
+      this.BET_STATES.LOST,
       { expirationReason: reason }
     );
   }
@@ -735,8 +740,8 @@ class BetTrackingService extends EventEmitter {
    */
   async validateGameSessionId(providedSessionId) {
     try {
-      const gameService = await import('../services/gameService.js');
-      const currentGameServiceSessionId = gameService.default.gameState.gameId;
+      const gameService = await this.getGameService();
+      const currentGameServiceSessionId = gameService.gameState.gameId;
 
       // STRICT VALIDATION: Exact match required
       if (!providedSessionId || providedSessionId !== currentGameServiceSessionId) {
@@ -1017,8 +1022,8 @@ class BetTrackingService extends EventEmitter {
    * @returns {string} Current game session ID
    */
   async initializeGameSessionId(externalGameSessionId = null) {
-    const gameService = await import('../services/gameService.js');
-    const currentGameServiceSessionId = gameService.default.gameState.gameId;
+    const gameService = await this.getGameService();
+    const currentGameServiceSessionId = gameService.gameState.gameId;
 
     // STRICT VALIDATION: Use ONLY gameService's game ID
     if (!currentGameServiceSessionId) {
@@ -1044,6 +1049,7 @@ class BetTrackingService extends EventEmitter {
    * @returns {string} New game session ID
    */
   async resetGameSessionId() {
+    const gameService = await this.getGameService();
     const currentGameServiceSessionId = gameService.gameState.gameId;
 
     // STRICT VALIDATION: Use ONLY gameService's game ID
@@ -1070,8 +1076,8 @@ class BetTrackingService extends EventEmitter {
    * @throws {Error} If session validation fails
    */
   async validateGameSessionId(providedSessionId) {
-    const gameService = await import('../services/gameService.js');
-    const currentGameServiceSessionId = gameService.default.gameState.gameId;
+    const gameService = await this.getGameService();
+    const currentGameServiceSessionId = gameService.gameState.gameId;
 
     // STRICT VALIDATION: Exact match required
     if (!providedSessionId || providedSessionId !== currentGameServiceSessionId) {
@@ -1245,8 +1251,7 @@ class BetTrackingService extends EventEmitter {
           try {
             await this.redisRepository.queueBetForNextSession({
               ...bet,
-              status: this.BET_STATES.EXPIRED,
-              originalSessionId: this.currentGameSessionId
+              status: this.BET_STATES.LOST
             });
             queuedBetIds.push(bet.id);
           } catch (queueError) {
@@ -1434,7 +1439,10 @@ class BetTrackingService extends EventEmitter {
         throw new Error('BET_PLACEMENT_NOT_ALLOWED_IN_BETTING_STATE');
       } else if (this.currentGameState === this.GAME_STATES.FLYING || this.currentGameState === this.GAME_STATES.CRASHED) {
         // Queue the bet for future processing
-        return await this.redisRepository.queueBetForNextSession(betDetails);
+        return await this.redisRepository.queueBetForNextSession({
+          ...betDetails,
+          status: this.BET_STATES.QUEUED
+        });
       } else {
         throw new Error('INVALID_GAME_STATE');
       }
@@ -1746,10 +1754,16 @@ class BetTrackingService extends EventEmitter {
           switch (cashoutStrategy) {
             case 'auto':
               // Automatically queue bet for cashout
-              return await this.redisRepository.queueBetForNextSession(betDetails);
+              return await this.redisRepository.queueBetForNextSession({
+                ...betDetails,
+                status: this.BET_STATES.QUEUED
+              });
             case 'queue':
               // Queue bet for next session
-              return await this.redisRepository.queueBetForNextSession(betDetails);
+              return await this.redisRepository.queueBetForNextSession({
+                ...betDetails,
+                status: this.BET_STATES.QUEUED
+              });
             default:
               // Reject bet if not in betting state
               logger.warn('BET_PLACED_IN_NON_BETTING_STATE', {
@@ -1762,7 +1776,10 @@ class BetTrackingService extends EventEmitter {
 
         case this.GAME_STATES.CRASHED:
           // Queue bet for next session
-          return await this.redisRepository.queueBetForNextSession(betDetails);
+          return await this.redisRepository.queueBetForNextSession({
+            ...betDetails,
+            status: this.BET_STATES.QUEUED
+          });
 
         default:
           logger.error('UNEXPECTED_GAME_STATE', {
@@ -1895,7 +1912,7 @@ class BetTrackingService extends EventEmitter {
           // Queue bet for next session
           await this.redisRepository.queueBetForNextSession({
             ...bet,
-            status: this.BET_STATES.EXPIRED
+            status: this.BET_STATES.LOST
           });
           queuedBetIds.push(bet.betId);
         } catch (queueError) {
@@ -1934,7 +1951,10 @@ class BetTrackingService extends EventEmitter {
       // Check if bet is in a non-betting state
       if (this.currentGameState !== this.GAME_STATES.BETTING) {
         // Queue cashout for next session
-        return await this.redisRepository.queueBetForNextSession(betDetails);
+        return await this.redisRepository.queueBetForNextSession({
+          ...betDetails,
+          status: this.BET_STATES.QUEUED
+        });
       }
 
       // Existing auto cashout logic
@@ -1966,7 +1986,7 @@ class BetTrackingService extends EventEmitter {
       }
 
       // Get current game state
-      const currentGameState = await gameService.getCurrentGameState();
+      const currentGameState = await (await this.getGameService()).getCurrentGameState();
 
       // Determine bet state based on game state
       let betState;

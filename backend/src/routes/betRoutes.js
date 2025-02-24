@@ -43,75 +43,72 @@ router.post('/place-bet',
   authMiddleware.authenticateToken, 
   async (req, res) => {
     try {
-      // Explicitly add decoded user to request object if not already present
-      if (!req.user && req.auth) {
-        req.user = req.auth;
-      }
+      const { amount, autoCashoutAt, autoRequeue } = req.body;
 
-      const { amount, userId, cashoutMultiplier } = req.body;
-      const authenticatedUserId = req.user ? req.user.user_id || req.user.userId : null;
+      // Log the authentication context
+      logger.debug('[BET_REQUEST_AUTH]', {
+        timestamp: new Date().toISOString(),
+        hasUser: !!req.user,
+        userId: req.user?.user_id,
+        username: req.user?.username,
+        token: req.token ? req.token.substring(0, 10) + '...' : null
+      });
 
-      // Validate user ID
-      if (!authenticatedUserId) {
+      // Ensure user is authenticated
+      if (!req.user || !req.user.user_id) {
+        logger.error('[AUTH_VALIDATION_FAILED]', {
+          timestamp: new Date().toISOString(),
+          hasUser: !!req.user,
+          userId: req.user?.user_id
+        });
         return res.status(401).json({
           success: false,
-          message: 'Unauthorized: Invalid user context'
+          message: 'Authentication required'
         });
       }
 
-      // Validate user ID match
-      if (userId !== authenticatedUserId) {
-        return res.status(403).json({
-          success: false,
-          message: 'User ID mismatch'
-        });
-      }
+      // Log the bet details being sent
+      logger.debug('[BET_DETAILS]', {
+        timestamp: new Date().toISOString(),
+        userId: req.user.user_id,
+        amount,
+        autoCashoutAt,
+        autoRequeue
+      });
 
-      // Validate bet amount
-      if (isNaN(amount) || amount <= 0) {
-        logger.error('[BET_PLACEMENT_ERROR] Invalid bet amount', { 
-          amount, 
-          receivedBody: JSON.stringify(req.body)
-        });
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid bet amount. Must be a positive number.',
-          details: `Received amount: ${amount}`
-        });
-      }
-
-      // Place bet
-      const result = await betService.placeBet({ 
-        amount: Number(amount), 
-        userId,
-        cashoutMultiplier: cashoutMultiplier ? Number(cashoutMultiplier) : null
-      }, req);  // Pass entire request object
-
-      // Track total bets
-      statsService.incrementTotalBetAmount(Number(amount));
+      // Call betService with the request context
+      const result = await betService.placeBet({
+        amount: Number(amount),
+        autoCashoutAt: autoCashoutAt ? Number(autoCashoutAt) : null,
+        autoRequeue: !!autoRequeue
+      }, req);
 
       // Log successful bet placement
       logger.info('[BET_PLACEMENT_SUCCESS]', {
+        timestamp: new Date().toISOString(),
         betId: result.betId,
-        amount: Number(amount),
-        userId,
-        gameId: gameService.gameState.gameId || 'N/A'
+        userId: req.user.user_id,
+        amount: Number(amount)
       });
 
-      res.status(200).json(result);
+      res.json(result);
+
     } catch (error) {
-      // Comprehensive error logging
-      logger.error('[BET_PLACEMENT_CRITICAL_ERROR]', {
+      // Log bet placement error
+      logger.error('[BET_PLACEMENT_ERROR]', {
+        timestamp: new Date().toISOString(),
+        errorType: error.constructor.name,
         errorMessage: error.message,
         errorStack: error.stack,
-        requestBody: JSON.stringify(req.body),
-        userObject: JSON.stringify(req.user || {})
+        userId: req.user?.user_id,
+        requestBody: req.body
       });
 
-      res.status(500).json({
+      // Send appropriate error response
+      res.status(error.status || 500).json({
         success: false,
-        message: 'Bet placement failed',
-        error: error.message
+        message: error.message || 'Failed to place bet',
+        code: error.code || 'BET_PLACEMENT_ERROR'
       });
     }
   }
@@ -121,41 +118,27 @@ router.post('/place-bet',
 router.post('/cashout', 
   authMiddleware.authenticateToken, 
   async (req, res) => {
-    const userId = req.user.user_id;
-    const rawMultiplier = req.body.multiplier;
-    const cashoutMultiplier = parseFloat(rawMultiplier);
-
-    // Log detailed multiplier information
-    logger.info('CASHOUT_MULTIPLIER_INCOMING', {
-      userId,
-      rawMultiplier,
-      parsedMultiplier: cashoutMultiplier,
-      rawMultiplierType: typeof rawMultiplier,
-      parsedMultiplierType: typeof cashoutMultiplier
-    });
-
-    // Validate multiplier
-    if (isNaN(cashoutMultiplier) || cashoutMultiplier <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid cashout multiplier'
-      });
-    }
-
     try {
-      // Perform cashout
-      const cashoutResult = await betService.cashOut(req, cashoutMultiplier);
+      const { multiplier } = req.body;
+      
+      // Validate multiplier
+      if (!multiplier || isNaN(multiplier) || multiplier <= 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid cashout multiplier'
+        });
+      }
 
-      // Return successful cashout response
+      const result = await betService.processCashout(req, parseFloat(multiplier));
+      
       res.status(200).json({
         success: true,
-        ...cashoutResult
+        ...result
       });
-
     } catch (error) {
       // Log and handle errors
-      logger.error('CASHOUT_PROCESS_CRITICAL_ERROR', {
-        userId,
+      logger.error('CASHOUT_ERROR', {
+        userId: req.user?.user_id,
         errorMessage: error.message,
         errorStack: error.stack
       });

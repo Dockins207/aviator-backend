@@ -54,7 +54,7 @@ class GameSocket {
   async authenticateUser(token) {
     try {
       // Verify the JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret_here');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237');
       
       // Get user profile using the decoded user ID
       const user = await authService.getUserProfile(decoded.userId);

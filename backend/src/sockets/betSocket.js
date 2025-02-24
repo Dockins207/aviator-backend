@@ -109,11 +109,8 @@ class BetSocket {
           const result = await this.betService.placeBet({
             amount: betAmount,
             autoCashoutEnabled,
-            autoCashoutMultiplier,
-            userId: socket.user.user_id,  // Explicitly include user ID
-            user: socket.user  // Include full user object
+            autoCashoutMultiplier
           }, { 
-            user: socket.user,  // Pass complete socket user
             socket: socket  // Provide full socket context
           });
 

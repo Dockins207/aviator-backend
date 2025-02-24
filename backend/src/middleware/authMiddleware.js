@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import logger from '../config/logger.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_here';
+const JWT_SECRET = process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237';
 
 // Optional: In-memory token blacklist (can be replaced with Redis or database)
 const tokenBlacklist = new Set();
@@ -18,25 +18,74 @@ export const authMiddleware = {
   },
 
   async authenticateToken(req, res, next) {
+    let token;
     try {
       const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+      token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+      // Log token details
+      logger.debug('TOKEN_DETAILS', {
+        timestamp: new Date().toISOString(),
+        hasAuthHeader: !!authHeader,
+        token: token ? token.substring(0, 10) + '...' : null
+      });
 
       if (!token) {
+        logger.error('NO_TOKEN_PROVIDED', {
+          timestamp: new Date().toISOString(),
+          headers: req.headers
+        });
         return res.status(401).json({ message: 'No token provided' });
       }
 
       // Check if token is blacklisted
       if (tokenBlacklist.has(token)) {
+        logger.error('BLACKLISTED_TOKEN_USED', {
+          timestamp: new Date().toISOString(),
+          token: token.substring(0, 10) + '...'
+        });
         return res.status(401).json({ message: 'Token is no longer valid' });
       }
 
+      // Verify and decode token
       const decoded = jwt.verify(token, JWT_SECRET);
-      req.user = decoded;
+
+      // Log decoded token contents
+      logger.debug('DECODED_TOKEN', {
+        timestamp: new Date().toISOString(),
+        userId: decoded.user_id,
+        username: decoded.username,
+        role: decoded.role
+      });
+
+      // Set user details from token
+      req.user = {
+        user_id: decoded.user_id, // Keep original user_id from token
+        username: decoded.username,
+        role: decoded.role,
+        roles: decoded.roles || [],
+        phone_number: decoded.phone_number,
+        is_active: decoded.is_active
+      };
+
+      // Log final user object
+      logger.debug('AUTH_USER_SET', {
+        timestamp: new Date().toISOString(),
+        userId: req.user.user_id,
+        username: req.user.username,
+        role: req.user.role
+      });
+
       req.token = token; // Attach token for potential logout/blacklisting
       next();
     } catch (error) {
-      logger.error('Authentication error', { error: error.message });
+      logger.error('AUTHENTICATION_ERROR', {
+        timestamp: new Date().toISOString(),
+        error: error.message,
+        type: error.name,
+        stack: error.stack,
+        token: token ? token.substring(0, 10) + '...' : null
+      });
       
       if (error.name === 'TokenExpiredError') {
         return res.status(401).json({ message: 'Token expired' });

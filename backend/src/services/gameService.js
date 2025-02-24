@@ -394,6 +394,29 @@ class GameBoardService {
     return gameState;
   }
 
+  // Get current game session details
+  getCurrentGameSession() {
+    try {
+      if (!this.gameState || !this.gameState.gameId) {
+        return null;
+      }
+
+      return {
+        id: this.gameState.gameId,
+        status: this.gameState.status,
+        multiplier: this.gameState.multiplier,
+        startTime: this.gameState.startTime,
+        crashPoint: this.gameState.crashPoint
+      };
+    } catch (error) {
+      logger.error('Error getting current game session', {
+        error: error.message,
+        stack: error.stack
+      });
+      return null;
+    }
+  }
+
   // Placeholder methods to maintain structure
   addPlayer() {}
   placeBet() {}

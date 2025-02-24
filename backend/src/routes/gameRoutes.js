@@ -1,9 +1,9 @@
 import express from 'express';
 import gameService from '../services/gameService.js';
-import betService from '../services/betService.js'; // Assuming betService is in the same directory as gameService
 import crypto from 'crypto';
 import { performance } from 'perf_hooks';
 import { authMiddleware } from '../middleware/authMiddleware.js';
+import logger from '../config/logger.js';
 
 const router = express.Router();
 
@@ -32,7 +32,7 @@ router.get('/state', (req, res) => {
       dataIntegrity: crypto.createHash('sha256').update(JSON.stringify(currentGameState)).digest('hex') // Optional: data integrity check
     });
   } catch (error) {
-    console.error('[GAME_STATE_ERROR] Detailed error:', {
+    logger.error('GAME_STATE_ERROR', {
       message: error.message,
       stack: error.stack,
       timestamp: Date.now()
@@ -51,99 +51,44 @@ router.get('/state', (req, res) => {
 });
 
 // Get game history
-router.get('/history', (req, res) => {
-  res.json({ 
-    message: 'Game history placeholder',
-    history: []
-  });
-});
-
-// Place a bet
-router.post('/place-bet', authMiddleware.authenticateToken, (req, res) => {
+router.get('/history', authMiddleware.authenticateToken, async (req, res) => {
   try {
-    const { amount } = req.body;
-    const user = req.user.id; // Extract user ID from authenticated token
-
-    // Validate input
-    if (!amount || amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid bet amount'
-      });
-    }
-
-    // Attempt to place bet using bet service
-    const result = betService.placeBet({ 
-      user, 
-      amount 
+    const history = await gameService.getGameHistory();
+    res.json({ 
+      success: true,
+      data: history
+    });
+  } catch (error) {
+    logger.error('GAME_HISTORY_ERROR', {
+      error: error.message,
+      userId: req.user?.user_id
     });
     
-    res.status(200).json(result);
-  } catch (error) {
-    console.error('[BET_PLACEMENT_ERROR]', error);
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Error retrieving game history',
+      error: error.message
     });
   }
 });
 
-// Activate bet for cashout during flying phase
-router.post('/activate-bet', authMiddleware.authenticateToken, (req, res) => {
+// Get current game statistics
+router.get('/stats', async (req, res) => {
   try {
-    const { betId } = req.body;
-    const user = req.user.id; // Extract user ID from authenticated token
-
-    // Validate input
-    if (!betId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Bet ID is required'
-      });
-    }
-
-    // Attempt to activate bet
-    const result = betService.activateBetForCashout(betId);
-    
-    res.status(200).json({
-      ...result,
-      message: 'Bet activated and ready for cashout'
+    const stats = await gameService.getCurrentGameStats();
+    res.json({
+      success: true,
+      data: stats
     });
   } catch (error) {
-    console.error('[BET_ACTIVATION_ERROR]', error);
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-});
-
-// Cash out during game
-router.post('/cashout', authMiddleware.authenticateToken, (req, res) => {
-  try {
-    const { betId } = req.body;
-    const user = req.user.id; // Extract user ID from authenticated token
-
-    // Validate input
-    if (!betId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Bet ID is required'
-      });
-    }
-
-    // Attempt to cashout bet
-    const result = betService.cashoutBet({ 
-      user, 
-      betId 
+    logger.error('GAME_STATS_ERROR', {
+      error: error.message
     });
     
-    res.status(200).json(result);
-  } catch (error) {
-    console.error('[CASHOUT_ERROR]', error);
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Error retrieving game statistics',
+      error: error.message
     });
   }
 });
