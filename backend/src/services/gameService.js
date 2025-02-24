@@ -667,6 +667,62 @@ class GameBoardService {
         break;
     }
   }
+
+  /**
+   * Transition to betting state and activate placed bets
+   * @param {string} gameSessionId - Current game session ID
+   */
+  async transitionToBettingState(gameSessionId) {
+    try {
+      // Update game state
+      await this.redisRepository.updateGameState(gameSessionId, 'betting');
+      
+      // Activate any placed bets for this session
+      await this.redisRepository.activatePlacedBets(gameSessionId);
+      
+      logger.info('Transitioned to betting state', {
+        gameSessionId,
+        state: 'betting',
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      logger.error('Failed to transition to betting state', {
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  // Transition to betting phase
+  async transitionToBettingPhase() {
+    try {
+      const gameSessionId = await this.getCurrentGameSessionId();
+      if (!gameSessionId) {
+        throw new Error('No active game session found');
+      }
+
+      // Transition to betting state (this will also activate placed bets)
+      await this.transitionToBettingState(gameSessionId);
+
+      // Notify clients of state change
+      this.io.emit('game:betting_phase', {
+        gameSessionId,
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info('Game transitioned to betting phase', {
+        gameSessionId,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      logger.error('Failed to transition to betting phase', {
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
 }
 
 export default GameBoardService.getInstance();

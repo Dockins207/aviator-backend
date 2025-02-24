@@ -66,35 +66,6 @@ class RedisRepository {
     }
   }
 
-  async hset(key, value) {
-    try {
-      const client = await this.ensureClientReady();
-      const flatValue = {};
-      
-      // Flatten and stringify objects for Redis
-      Object.entries(value).forEach(([k, v]) => {
-        flatValue[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
-      });
-
-      // Only log storage details in debug mode
-      if (process.env.NODE_ENV !== 'production') {
-        logger.debug('STORING_BET_DETAILS', {
-          betId: value.id,
-          betHash: flatValue
-        });
-      }
-
-      return await client.hSet(key, flatValue);
-    } catch (error) {
-      logger.error('REDIS_HSET_ERROR', {
-        key,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-      throw error;
-    }
-  }
-
   async sadd(key, value) {
     try {
       const client = await this.ensureClientReady();
@@ -110,20 +81,6 @@ class RedisRepository {
     }
   }
 
-  async hdel(key) {
-    try {
-      const client = await this.ensureClientReady();
-      return await client.hDel(key);
-    } catch (error) {
-      logger.error('REDIS_HDEL_ERROR', {
-        key,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-      throw error;
-    }
-  }
-
   async srem(key, value) {
     try {
       const client = await this.ensureClientReady();
@@ -132,6 +89,84 @@ class RedisRepository {
       logger.error('REDIS_SREM_ERROR', {
         key,
         value,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async smembers(key) {
+    try {
+      const client = await this.ensureClientReady();
+      return await client.sMembers(key);
+    } catch (error) {
+      logger.error('REDIS_SMEMBERS_ERROR', {
+        key,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async hset(key, value) {
+    try {
+      const client = await this.ensureClientReady();
+      const flatValue = {};
+      
+      // Flatten and stringify objects for Redis
+      Object.entries(value).forEach(([k, v]) => {
+        flatValue[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      });
+
+      return await client.hSet(key, flatValue);
+    } catch (error) {
+      logger.error('REDIS_HSET_ERROR', {
+        key,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async hgetall(key) {
+    try {
+      const client = await this.ensureClientReady();
+      return await client.hGetAll(key);
+    } catch (error) {
+      logger.error('REDIS_HGETALL_ERROR', {
+        key,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async expire(key, seconds) {
+    try {
+      const client = await this.ensureClientReady();
+      return await client.expire(key, seconds);
+    } catch (error) {
+      logger.error('REDIS_EXPIRE_ERROR', {
+        key,
+        seconds,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async hdel(key) {
+    try {
+      const client = await this.ensureClientReady();
+      return await client.hDel(key);
+    } catch (error) {
+      logger.error('REDIS_HDEL_ERROR', {
+        key,
         errorMessage: error.message,
         errorStack: error.stack
       });
@@ -933,10 +968,10 @@ class RedisRepository {
 
       // Store bet in game session hash
       const betKey = `game:${gameSessionId}:bets`;
-      await client.hSet(betKey, betId, JSON.stringify(betData));
+      await this.hSet(betKey, betId, JSON.stringify(betData));
       
       // Set expiration for the bet hash
-      await client.expire(betKey, 3600); // 1 hour expiration
+      await this.expire(betKey, 3600); // 1 hour expiration
 
       // Track bet metrics
       redisServer.trackBetMetrics(gameSessionId, betAmount);
@@ -1475,7 +1510,8 @@ class RedisRepository {
       return {
         ...activationResults,
         failedCount: bulkActivationData ? 
-          (Array.isArray(bulkActivationData) ? bulkActivationData.length : 1) : 0,
+          (Array.isArray(bulkActivationData) 
+            ? bulkActivationData.length : 1) : 0,
         failedBetIds: bulkActivationData ? 
           (Array.isArray(bulkActivationData) 
             ? bulkActivationData.map(bet => bet?.betId || 'unknown') 
@@ -1491,7 +1527,7 @@ class RedisRepository {
    * Single attempt bet activation
    * @param {Array} bulkActivationData - Array of bet activation details
    * @param {string} targetState - Target bet state
-   * @returns {Object} Activation results with individual processing
+   * @returns {Promise<Object>} Activation results with individual processing
    */
   async activateBets(bulkActivationData, targetState) {
     const startTime = Date.now();
@@ -1625,7 +1661,7 @@ class RedisRepository {
             status: this.BET_STATES.NEXT_SESSION
           };
         } catch (parseError) {
-          this.logger.warn('Failed to parse next session bet data', { 
+          this.logger.error('Failed to parse next session bet data', { 
             betId, 
             errorMessage: parseError.message 
           });
@@ -2490,7 +2526,7 @@ class RedisRepository {
    * @param {Object} betDetails - Bet details to queue
    * @param {Object} cashoutStrategy - Cashout strategy details
    * @param {number} [expirationTime=3600] - Expiration time in seconds
-   * @returns {Promise<boolean>} Whether the bet was successfully queued
+   * @returns {Promise<Object>} Queued bet details
    */
   async queueBetForNextSession(betDetails, cashoutStrategy, expirationTime = 3600) {
     try {
@@ -2518,7 +2554,7 @@ class RedisRepository {
         gameSessionId: null // Will be updated when activated in next session
       };
 
-      // Store in queued bets index with session tracking
+      // Store bet in queued bets index with session tracking
       await client.hSet(queueKey, betId, JSON.stringify(queuedBet));
       
       // Add to queued bets set for efficient retrieval
@@ -2534,7 +2570,11 @@ class RedisRepository {
         cashoutType: cashoutStrategy.type
       });
 
-      return true;
+      return {
+        betId,
+        queuedAt: new Date().toISOString(),
+        sessionId: 'global'
+      };
     } catch (error) {
       logger.error('Failed to queue bet for next session', {
         errorMessage: error.message,
@@ -2632,26 +2672,59 @@ class RedisRepository {
   async cleanupExpiredQueuedBets() {
     try {
       const currentTime = Date.now();
-      const queueKeys = await this._client.keys('next_session_bets:*');
+      const queueKey = 'global:queued_bets';
 
-      let totalExpiredBets = 0;
-      for (const queueKey of queueKeys) {
-        // Remove bets that have expired
-        await this._client.zremrangebyscore(
-          queueKey, 
-          0, 
-          currentTime - SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS * 1000
-        );
+      // Retrieve queued bets using compatible methods
+      let queuedBetsRaw = {};
+      if (typeof this._client.hgetall === 'function') {
+        queuedBetsRaw = await this._client.hgetall(queueKey);
+      } else if (typeof this._client.hkeys === 'function' && typeof this._client.hget === 'function') {
+        const betKeys = await this._client.hkeys(queueKey);
+        for (const betKey of betKeys) {
+          const betData = await this._client.hget(queueKey, betKey);
+          queuedBetsRaw[betKey] = betData;
+        }
+      }
+
+      // Identify and remove expired bets
+      const expiredBetIds = Object.keys(queuedBetsRaw).filter(betId => {
+        try {
+          const bet = JSON.parse(queuedBetsRaw[betId]);
+          return new Date(bet.expiresAt) < new Date(currentTime);
+        } catch (parseError) {
+          logger.warn('INVALID_EXPIRED_BET_JSON', { 
+            rawBet: queuedBetsRaw[betId], 
+            error: parseError.message 
+          });
+          return false;
+        }
+      });
+
+      // Remove expired bets using compatible methods
+      if (expiredBetIds.length > 0) {
+        if (typeof this._client.hdel === 'function') {
+          await this._client.hdel(queueKey, ...expiredBetIds);
+        } else {
+          // Fallback removal method
+          for (const betId of expiredBetIds) {
+            await this._client.del(`${queueKey}:${betId}`);
+          }
+        }
       }
 
       logger.info('EXPIRED_QUEUED_BETS_CLEANED', {
-        timestamp: new Date(currentTime).toISOString()
+        timestamp: new Date(currentTime).toISOString(),
+        expiredBetsCount: expiredBetIds.length
       });
+
+      return expiredBetIds.length;
     } catch (error) {
       logger.error('EXPIRED_BETS_CLEANUP_ERROR', {
         errorMessage: error.message,
-        context: 'cleanupExpiredQueuedBets'
+        context: '_cleanupExpiredQueuedBets',
+        clientMethods: Object.keys(this._client || {})
       });
+      return 0;
     }
   }
 
@@ -2683,17 +2756,39 @@ class RedisRepository {
    */
   async removeProcessedQueuedBets(processedBetIds) {
     try {
-      const nextSessionBetsKey = 'game:next_session:bets';
+      const client = await this.ensureClientReady();
       
-      if (!processedBetIds || processedBetIds.length === 0) return 0;
+      // Determine the queue keys to remove from
+      const queueKeys = processedBetIds.map(betId => `game:next_session:bets:${betId}`);
+      
+      let removedCount = 0;
+      for (const queueKey of queueKeys) {
+        // Remove each processed bet using compatible methods
+        let betRemoved = false;
+        
+        // Try different removal methods
+        if (typeof this._client.hdel === 'function') {
+          // Modern Redis clients
+          const betsToRemove = await this._client.hget(queueKey, betId);
+          if (betsToRemove) {
+            await this._client.hdel(queueKey, betId);
+            betRemoved = true;
+          }
+        } else if (typeof this._client.del === 'function') {
+          // Fallback for simple clients
+          const fullKey = `${queueKey}:${betId}`;
+          const betExists = await this._client.exists(fullKey);
+          
+          if (betExists) {
+            await this._client.del(fullKey);
+            betRemoved = true;
+          }
+        }
 
-      const pipeline = this._client.pipeline();
-      processedBetIds.forEach(betId => {
-        pipeline.hdel(nextSessionBetsKey, betId);
-      });
-
-      const results = await pipeline.exec();
-      const removedCount = results.filter(([err, result]) => result === 1).length;
+        if (betRemoved) {
+          removedCount++;
+        }
+      }
 
       logger.info('PROCESSED_BETS_REMOVED', { 
         removedCount, 
@@ -2702,9 +2797,10 @@ class RedisRepository {
 
       return removedCount;
     } catch (error) {
-      logger.error('Error removing processed queued bets', {
+      logger.error('REMOVE_PROCESSED_BETS_ERROR', {
         errorMessage: error.message,
-        processedBetIds
+        context: 'removeProcessedQueuedBets',
+        clientMethods: Object.keys(this._client || {})
       });
       return 0;
     }
@@ -2758,7 +2854,8 @@ class RedisRepository {
         try {
           return {
             betId: betId,
-            ...JSON.parse(betData)
+            ...JSON.parse(betData),
+            status: this.BET_STATES.PLACED
           };
         } catch (parseError) {
           logger.warn('INVALID_BET_DATA_FORMAT', {
@@ -2979,115 +3076,30 @@ class RedisRepository {
       // Store bet with unique identifier, preserving original session ID for reference
       const queuedBetData = {
         ...queuedBet,
-        originalSessionId: gameSessionId, // Store original session ID for reference
+        id: queuedBet.id || uuidv4(), // Ensure consistent ID key
+        queuedAt: new Date().toISOString(),
         status: 'queued',
-        queuedAt: new Date().toISOString()
+        originalSessionId: gameSessionId, // Store original session ID for reference
+        gameSessionId: null // Will be updated when activated in next session
       };
+
+      // Store bet in queued bets index with session tracking
+      await client.hSet(key, queuedBetData.id, JSON.stringify(queuedBetData));
       
-      // Store bet with unique identifier
-      await client.hset(key, queuedBet.id, JSON.stringify(queuedBetData));
+      // Add to queued bets set for efficient retrieval
+      await client.sAdd(`game:${gameSessionId}:queued_set`, queuedBetData.id);
       
-      // Set an expiration to prevent stale queued bets
+      // Set expiration on both keys
       await client.expire(key, 10 * 60); // 10 minutes
       
       logger.info('QUEUED_BET_STORED', {
-        betId: queuedBet.id,
+        betId: queuedBetData.id,
         originalSessionId: gameSessionId,
-        userId: queuedBet.userId,
+        userId: queuedBetData.userId,
         queuedAt: queuedBetData.queuedAt
       });
     } catch (error) {
       logger.error('QUEUED_BET_STORAGE_ERROR', {
-        gameSessionId,
-        errorMessage: error.message
-      });
-      throw error;
-    }
-  }
-
-  async retrieveQueuedBets(gameSessionId = null) {
-    try {
-      const client = await this.ensureClientReady();
-      const key = 'global:queued_bets';
-
-      // Retrieve all queued bets using compatible methods
-      let queuedBetsRaw = {};
-      if (typeof this._client.hgetall === 'function') {
-        queuedBetsRaw = await this._client.hgetall(key);
-      } else if (typeof this._client.hkeys === 'function' && typeof this._client.hget === 'function') {
-        const betKeys = await this._client.hkeys(key);
-        for (const betKey of betKeys) {
-          const betData = await this._client.hget(key, betKey);
-          queuedBetsRaw[betKey] = betData;
-        }
-      }
-
-      const queuedBets = [];
-      
-      // Process each bet in the hash
-      for (const [betId, rawBet] of Object.entries(queuedBetsRaw)) {
-        try {
-          const bet = JSON.parse(rawBet);
-          
-          // Validate bet structure
-          if (!bet.id || !bet.userId) {
-            logger.warn('INVALID_QUEUED_BET_STRUCTURE', { 
-              betId, 
-              rawBet 
-            });
-            continue;
-          }
-
-          // Add metadata and only add unique bets
-          if (!queuedBets.some(existingBet => existingBet.id === bet.id)) {
-            queuedBets.push({
-              ...bet,
-              queueSource: key,
-              status: 'queued'
-            });
-          }
-        } catch (parseError) {
-          logger.warn('QUEUED_BET_PARSE_FAILURE', {
-            betId,
-            rawBet,
-            errorMessage: parseError.message
-          });
-        }
-      }
-
-      // Log retrieval details
-      logger.debug('QUEUED_BETS_RETRIEVAL', {
-        totalQueuedBets: queuedBets.length,
-        betIds: queuedBets.map(bet => bet.id),
-        timestamp: new Date().toISOString()
-      });
-
-      return queuedBets;
-    } catch (error) {
-      logger.error('QUEUED_BETS_RETRIEVAL_ERROR', {
-        errorMessage: error.message,
-        errorStack: error.stack,
-        timestamp: new Date().toISOString()
-      });
-
-      return [];
-    }
-  }
-
-  async removeQueuedBet(gameSessionId, betId) {
-    try {
-      const client = await this.ensureClientReady();
-      const key = `queued_bets:${gameSessionId}`;
-      
-      await client.hdel(key, betId);
-      
-      logger.info('QUEUED_BET_REMOVED', {
-        betId,
-        gameSessionId
-      });
-    } catch (error) {
-      logger.error('QUEUED_BET_REMOVAL_ERROR', {
-        betId,
         gameSessionId,
         errorMessage: error.message
       });
@@ -3135,19 +3147,13 @@ class RedisRepository {
   async queueBetForNextSession(betDetails, sessionId = null) {
     try {
       const client = await this.ensureClientReady();
-      logger.debug('Queueing bet for next session', { betDetails, sessionId });
-      // Ensure Redis client is ready
-      if (!this._client) {
-        logger.error('REDIS_CLIENT_NOT_READY', { service: 'RedisRepository' });
-        throw new Error('Redis client is not ready');
+      
+      // Get current session for tracking
+      const currentSession = await this.getCurrentGameSessionId();
+      if (!currentSession) {
+        throw new Error('No active game session found');
       }
-      // Validate bet details
-      if (!betDetails || !betDetails.userId || !betDetails.amount) {
-        throw new Error('INVALID_BET_DETAILS');
-      }
-
-      // Generate unique bet queue key
-      const currentTime = Date.now();
+      
       const betId = betDetails.id || uuidv4();
       
       // Always use global queue key for queued bets
@@ -3157,34 +3163,34 @@ class RedisRepository {
       const queuedBet = {
         ...betDetails,
         id: betId,  // Ensure consistent ID key
-        queuedAt: currentTime,
-        expiresAt: currentTime + SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS * 1000,
+        queuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS * 1000).toISOString(),
         status: 'queued',
-        originalSessionId: sessionId, // Track which session it was queued from
+        originalSessionId: currentSession, // Track which session it was queued from
         gameSessionId: null // Will be updated when activated in next session
       };
 
-      // Store in queued bets index with session tracking
+      // Store bet in queued bets index with session tracking
       await client.hSet(queueKey, betId, JSON.stringify(queuedBet));
       
       // Add to queued bets set for efficient retrieval
-      await client.sAdd(`game:${sessionId}:queued_set`, betId);
+      await client.sAdd(`game:${currentSession}:queued_set`, betId);
       
       // Set expiration on both keys
       await client.expire(queueKey, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
-      await client.expire(`game:${sessionId}:queued_set`, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
+      await client.expire(`game:${currentSession}:queued_set`, SESSION_MANAGEMENT_CONFIG.SESSION_EXPIRY_SECONDS);
 
       logger.info('BET_QUEUED_FOR_SESSION', {
         betId,
         userId: betDetails.userId,
         amount: betDetails.amount,
-        queuedAt: new Date(currentTime).toISOString(),
+        queuedAt: new Date().toISOString(),
         sessionId: sessionId || 'global'
       });
 
       return {
         betId,
-        queuedAt: new Date(currentTime).toISOString(),
+        queuedAt: new Date().toISOString(),
         sessionId: sessionId || 'global'
       };
     } catch (error) {
@@ -3551,7 +3557,7 @@ class RedisRepository {
    * Retrieve a bet by its ID within a specific game session with enhanced retrieval
    * @param {string} gameSessionId - Game session identifier
    * @param {string} betId - Unique bet identifier
-   * @returns {Promise<Object|null>} Retrieved bet details or null
+   * @returns {Promise<Object|null>} Retrieved bet data or null
    */
   async getBetById(gameSessionId, betId) {
     try {
@@ -3629,175 +3635,119 @@ class RedisRepository {
   }
 
   /**
-   * Normalize bet details to a consistent format
-   * @param {string} gameSessionId - Game session identifier
-   * @param {Object} betDetails - Raw bet details
-   * @returns {Object} Normalized bet details
-   * @private
+   * Helper method for Redis SREM operation
+   * @param {string} key - Redis key
+   * @param {string} value - Value to remove from set
+   * @returns {Promise<number>} Number of elements removed
    */
-  _normalizeBetDetails(gameSessionId, betDetails) {
-    // Deep clone to avoid mutating original object
-    const rawBetDetails = JSON.parse(JSON.stringify(betDetails));
-
-    // Handle different input formats with multiple levels of nesting
-    if (rawBetDetails.gameSessionId && typeof rawBetDetails.gameSessionId === 'object') {
-      // If gameSessionId is an object, extract the actual bet details
-      Object.assign(rawBetDetails, rawBetDetails.gameSessionId);
-    }
-
-    // Extract bet details, prioritizing nested objects
-    const extractedDetails = {
-      id: rawBetDetails.id || 
-          rawBetDetails.betId || 
-          rawBetDetails.gameSessionId?.id || 
-          uuidv4(),
-      
-      userId: rawBetDetails.userId || 
-              rawBetDetails.gameSessionId?.userId,
-      
-      amount: rawBetDetails.amount || 
-              rawBetDetails.betAmount || 
-              rawBetDetails.gameSessionId?.amount,
-      
-      status: rawBetDetails.status || 
-              rawBetDetails.gameSessionId?.status || 
-              'placed',
-      
-      createdAt: rawBetDetails.createdAt || 
-                 rawBetDetails.gameSessionId?.createdAt || 
-                 new Date().toISOString(),
-      
-      userDetails: rawBetDetails.userDetails || 
-                   rawBetDetails.gameSessionId?.userDetails || {
-        username: rawBetDetails.username || 
-                  rawBetDetails.gameSessionId?.username,
-        role: rawBetDetails.role || 
-              rawBetDetails.gameSessionId?.role || 
-              'player'
-      },
-      
-      metadata: {
-        ...rawBetDetails.metadata,
-        ...rawBetDetails.gameSessionId?.metadata,
-        originalGameStatus: rawBetDetails.originalGameStatus || 
-                            rawBetDetails.gameStatus || 
-                            rawBetDetails.gameSessionId?.gameStatus
-      }
-    };
-
-    // Ensure all required fields are present
-    if (!extractedDetails.userId) {
-      logger.warn('BET_DETAILS_EXTRACTION_WARNING', {
-        rawBetDetails,
-        extractedDetails
-      });
-      throw new Error('UNABLE_TO_EXTRACT_USER_ID');
-    }
-
-    // Add game session ID
-    extractedDetails.gameSessionId = gameSessionId;
-    return extractedDetails;
-  }
-
-  async hgetall(key) {
-    const client = await this.ensureClientReady();
-    return await client.hGetAll(key);
-  }
-
-  async getPlacedBets(gameSessionId) {
+  async srem(key, value) {
     try {
       const client = await this.ensureClientReady();
-      const placedBetsKey = `placed_bets:${gameSessionId}`;
-      
-      // Using HGETALL command directly for Redis v4
-      const placedBets = await client.HGETALL(placedBetsKey) || {};
-      
-      return Object.entries(placedBets).map(([betId, betData]) => {
-        const bet = JSON.parse(betData);
-        return {
-          betId,
-          ...bet
-        };
-      });
+      return await client.sRem(key, value);
     } catch (error) {
-      logger.error('GET_PLACED_BETS_ERROR', {
-        gameSessionId,
-        error: error.message,
-        stack: error.stack
+      logger.error('REDIS_SREM_ERROR', {
+        key,
+        value,
+        errorMessage: error.message,
+        errorStack: error.stack
       });
       throw error;
     }
   }
 
-  async bulkActivateBets(bulkActivationData, targetState) {
-    const activationResults = {
-      successCount: 0,
-      failedCount: 0,
-      successfulBetIds: [],
-      failedBetIds: [],
-      processingTime: 0,
-      error: false,
-      errorMessage: null
-    };
-
-    const startTime = Date.now();
-
+  /**
+   * Bulk activate bets for a new game session
+   * @param {string} gameId - Current game session identifier
+   * @returns {Promise<{success: Array, failed: Array}>} Results of bulk activation
+   */
+  async bulkActivateBets(newGameId) {
     try {
       const client = await this.ensureClientReady();
+      const queuedBets = await this.getQueuedBets();
       
-      // Use Redis transaction to ensure atomicity
-      const multi = client.multi();
-
-      for (const bet of bulkActivationData) {
-        const { betId, userId, gameSessionId, amount, autoCashoutMultiplier } = bet;
-        
-        // Prepare bet data
-        const betData = {
-          betId,
-          userId,
-          gameSessionId,
-          amount,
-          autoCashoutMultiplier,
-          status: targetState,
-          activatedAt: new Date().toISOString()
-        };
-
-        // Add to active bets
-        const activeBetsKey = `active_bets:${gameSessionId}`;
-        multi.HSET(activeBetsKey, betId, JSON.stringify(betData));
-
-        // Add to user's active bets
-        const userActiveBetsKey = `user:${userId}:active_bets`;
-        multi.HSET(userActiveBetsKey, betId, JSON.stringify(betData));
-
-        // Remove from placed bets if exists
-        const placedBetsKey = `placed_bets:${gameSessionId}`;
-        multi.HDEL(placedBetsKey, betId);
+      if (!queuedBets.length) {
+        logger.info('NO_QUEUED_BETS_TO_ACTIVATE', { newGameId });
+        return { success: [], failed: [] };
       }
-
-      // Execute transaction
-      await multi.exec();
-
-      // All bets activated successfully
-      activationResults.successCount = bulkActivationData.length;
-      activationResults.successfulBetIds = bulkActivationData.map(bet => bet.betId);
-
-    } catch (error) {
-      activationResults.error = true;
-      activationResults.errorMessage = error.message;
-      activationResults.failedCount = bulkActivationData.length;
-      activationResults.failedBetIds = bulkActivationData.map(bet => bet.betId);
-
-      logger.error('BULK_ACTIVATE_BETS_ERROR', {
-        error: error.message,
-        stack: error.stack,
-        bulkActivationData
+      
+      const results = {
+        success: [],
+        failed: []
+      };
+      
+      // Process bets in batches of 50
+      const batchSize = 50;
+      for (let i = 0; i < queuedBets.length; i += batchSize) {
+        const batch = queuedBets.slice(i, i + batchSize);
+        const multi = client.multi();
+        
+        batch.forEach(bet => {
+          // Prepare updated bet with new session ID
+          const updatedBet = {
+            ...bet,
+            gameSessionId: newGameId, // Assign new session ID
+            status: 'active',
+            activatedAt: new Date().toISOString(),
+            previousStatus: bet.status,
+            originalSessionId: bet.originalSessionId, // Preserve original session ID
+            stateTransitions: [
+              ...(bet.stateTransitions || []),
+              {
+                from: 'queued',
+                to: 'active',
+                timestamp: new Date().toISOString(),
+                previousSessionId: bet.originalSessionId,
+                newSessionId: newGameId
+              }
+            ]
+          };
+          
+          // Remove from global queued bets
+          multi.hDel('global:queued_bets', bet.id);
+          
+          // Add to new game session's active bets
+          const newSessionKey = this._getBetStorageKey(newGameId, 'active');
+          multi.hSet(newSessionKey, bet.id, JSON.stringify(updatedBet));
+          
+          // Add to active bets index
+          multi.sAdd(`game:${newGameId}:active_bets`, bet.id);
+        });
+        
+        try {
+          await multi.exec();
+          results.success.push(...batch.map(b => ({ 
+            id: b.id, 
+            userId: b.userId,
+            originalSessionId: b.originalSessionId,
+            newSessionId: newGameId
+          })));
+        } catch (error) {
+          results.failed.push(...batch.map(b => ({ 
+            id: b.id, 
+            userId: b.userId,
+            originalSessionId: b.originalSessionId, 
+            error: error.message 
+          })));
+        }
+      }
+      
+      logger.info('BULK_BET_ACTIVATION_RESULTS', {
+        newGameId,
+        totalBets: queuedBets.length,
+        successCount: results.success.length,
+        failedCount: results.failed.length,
+        timestamp: new Date().toISOString()
       });
-    } finally {
-      activationResults.processingTime = Date.now() - startTime;
+      
+      return results;
+    } catch (error) {
+      logger.error('BULK_ACTIVATE_QUEUED_BETS_ERROR', {
+        newGameId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
     }
-
-    return activationResults;
   }
 
   /**
@@ -3806,23 +3756,874 @@ class RedisRepository {
    * @param {string} betId - Bet ID to add
    * @returns {Promise<void>}
    */
-  async addActiveBet(gameSessionId, betId) {
+  async addActiveBetToSet(gameSessionId, betId) {
     try {
-      const key = `game:${gameSessionId}:activeBets`;
-      await this.redis.sadd(key, betId);
+      const client = await this.ensureClientReady();
+      await client.sAdd(`game:${gameSessionId}:active_bets`, betId);
       
-      // Set expiration for cleanup (24 hours)
-      await this.redis.expire(key, 24 * 60 * 60);
-      
-      logger.debug('Added bet to active bets set', {
-        gameSessionId,
-        betId
+      logger.debug('Added bet to active set', {
+        betId,
+        gameSessionId
       });
     } catch (error) {
-      logger.error('Failed to add bet to active bets set', {
+      logger.error('Failed to add bet to active set', {
+        betId,
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all placed bets that need activation
+   * @returns {Promise<Array>} List of placed bets
+   */
+  async getPlacedBets() {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBetsKey = 'bets:placed';
+      const placedBets = await client.sMembers(placedBetsKey);
+      
+      const bets = [];
+      for (const betId of placedBets) {
+        const bet = await client.hGetAll(`bet:${betId}`);
+        if (bet) {
+          bets.push({ ...bet, id: betId });
+        }
+      }
+      
+      return bets;
+    } catch (error) {
+      logger.error('Failed to get placed bets', {
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Activate placed bets for a new game session
+   * @param {string} gameSessionId - New game session ID
+   * @returns {Promise<Object>} Activation results
+   */
+  async activatePlacedBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBets = await this.getPlacedBets();
+      const results = {
+        activated: [],
+        failed: []
+      };
+
+      for (const bet of placedBets) {
+        try {
+          // Update bet status to active
+          await client.hset(`bet:${bet.id}`, 'status', 'ACTIVE');
+          await client.hset(`bet:${bet.id}`, 'gameSessionId', gameSessionId);
+          
+          // Add to active bets set
+          await this.addActiveBetToSet(gameSessionId, bet.id);
+          
+          // Remove from placed bets set
+          await client.srem('bets:placed', bet.id);
+          
+          results.activated.push({
+            betId: bet.id,
+            userId: bet.userId,
+            amount: bet.amount
+          });
+        } catch (error) {
+          results.failed.push({
+            betId: bet.id,
+            error: error.message
+          });
+        }
+      }
+
+      // Log activation results
+      logger.info('Placed bets activation results', {
+        gameSessionId,
+        activated: results.activated.length,
+        failed: results.failed.length
+      });
+
+      return results;
+    } catch (error) {
+      logger.error('Failed to activate placed bets', {
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Store a placed bet (not yet active)
+   * @param {Object} bet - Bet details to store
+   * @returns {Promise<void>}
+   */
+  async storePlacedBet(bet) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Convert bet object to string values for Redis
+      const betData = Object.entries(bet).reduce((acc, [key, value]) => {
+        acc[key] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        return acc;
+      }, {});
+
+      // Store bet details using hset helper
+      await this.hset(`bet:${bet.id}`, {
+        ...betData,
+        status: 'PLACED'
+      });
+      
+      // Add to placed bets set using sadd helper
+      await this.sadd('bets:placed', bet.id);
+      
+      // Set expiration (24 hours)
+      const client2 = await this.ensureClientReady();
+      await client2.expire(`bet:${bet.id}`, 24 * 60 * 60);
+      
+      logger.debug('Stored placed bet', {
+        betId: bet.id,
+        userId: bet.userId
+      });
+    } catch (error) {
+      logger.error('Failed to store placed bet', {
+        betId: bet.id,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all placed bets that need activation
+   * @returns {Promise<Array>} List of placed bets
+   */
+  async getPlacedBets() {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBetsKey = 'bets:placed';
+      const placedBets = await client.sMembers(placedBetsKey);
+      
+      const bets = [];
+      for (const betId of placedBets) {
+        const bet = await client.hGetAll(`bet:${betId}`);
+        if (bet) {
+          bets.push({ ...bet, id: betId });
+        }
+      }
+      
+      return bets;
+    } catch (error) {
+      logger.error('Failed to get placed bets', {
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Activate placed bets for a new game session
+   * @param {string} gameSessionId - New game session ID
+   * @returns {Promise<Object>} Activation results
+   */
+  async activatePlacedBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBets = await this.getPlacedBets();
+      const results = {
+        activated: [],
+        failed: []
+      };
+
+      for (const bet of placedBets) {
+        try {
+          // Update bet status to active
+          await client.hset(`bet:${bet.id}`, 'status', 'ACTIVE');
+          await client.hset(`bet:${bet.id}`, 'gameSessionId', gameSessionId);
+          
+          // Add to active bets set
+          await this.addActiveBetToSet(gameSessionId, bet.id);
+          
+          // Remove from placed bets set
+          await client.srem('bets:placed', bet.id);
+          
+          results.activated.push({
+            betId: bet.id,
+            userId: bet.userId,
+            amount: bet.amount
+          });
+        } catch (error) {
+          results.failed.push({
+            betId: bet.id,
+            error: error.message
+          });
+        }
+      }
+
+      // Log activation results
+      logger.info('Placed bets activation results', {
+        gameSessionId,
+        activated: results.activated.length,
+        failed: results.failed.length
+      });
+
+      return results;
+    } catch (error) {
+      logger.error('Failed to activate placed bets', {
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Helper method for Redis HGETALL operation
+   * @param {string} key - Redis key
+   * @returns {Promise<Object>} Hash fields and values
+   */
+  async hgetall(key) {
+    try {
+      const client = await this.ensureClientReady();
+      const result = await client.hGetAll(key);
+      const client2 = await this.ensureClientReady();
+      return result;
+    } catch (error) {
+      logger.error('REDIS_HGETALL_ERROR', {
+        key,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Store an active bet for the current game session
+   * @param {string} gameSessionId - Current game session ID
+   * @param {Object} bet - Bet details
+   */
+  async storeBet(gameSessionId, bet) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Convert bet object to string values
+      const betData = Object.entries(bet).reduce((acc, [key, value]) => {
+        acc[key] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        return acc;
+      }, {});
+
+      // Store bet in game session hash
+      const betKey = `game:${gameSessionId}:bets`;
+      await this.hset(`${betKey}:${bet.id}`, {
+        ...betData,
+        status: 'ACTIVE',
+        gameSessionId
+      });
+      
+      // Add to active bets set
+      await this.sadd(`game:${gameSessionId}:active_bets`, bet.id);
+      
+      // Set expiration (1 hour)
+      await this.expire(betKey, 3600);
+      
+      logger.debug('Stored active bet', {
+        betId: bet.id,
+        userId: bet.userId,
+        gameSessionId,
+        status: 'ACTIVE'
+      });
+    } catch (error) {
+      logger.error('Failed to store active bet', {
+        betId: bet.id,
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Add a bet to the active bets set for a game session
+   * @param {string} gameSessionId - Game session ID
+   * @param {string} betId - Bet ID to activate
+   */
+  async addActiveBetToSet(gameSessionId, betId) {
+    try {
+      // Add to active bets set
+      await this.sadd(`game:${gameSessionId}:active_bets`, betId);
+      
+      logger.debug('Added bet to active set', {
+        betId,
+        gameSessionId
+      });
+    } catch (error) {
+      logger.error('Failed to add bet to active set', {
+        betId,
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Activate placed bets for the current game session
+   * @param {string} gameSessionId - Current game session ID
+   */
+  async activatePlacedBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get all placed bets
+      const placedBetIds = await this.smembers('bets:placed');
+      if (!placedBetIds.length) {
+        logger.debug('No placed bets to activate', { gameSessionId });
+        return;
+      }
+
+      logger.info('Activating placed bets', {
+        gameSessionId,
+        placedBetCount: placedBetIds.length
+      });
+
+      // Process each placed bet
+      for (const betId of placedBetIds) {
+        try {
+          // Get bet details
+          const betKey = `bet:${betId}`;
+          const betData = await client.hGetAll(betKey);
+          
+          if (!betData || !betData.id) {
+            logger.warn('Invalid bet data found', { betId, gameSessionId });
+            continue;
+          }
+
+          // Update bet status to active
+          await client.hset(`${betKey}`, {
+            ...betData,
+            status: 'ACTIVE',
+            gameSessionId,
+            activatedAt: new Date().toISOString()
+          });
+
+          // Add to current session's active bets
+          await this.sadd(`game:${gameSessionId}:active_bets`, betId);
+          
+          // Remove from placed bets
+          await client.srem('bets:placed', betId);
+
+          logger.debug('Activated placed bet', {
+            betId,
+            userId: betData.userId,
+            gameSessionId
+          });
+        } catch (error) {
+          logger.error('Failed to activate placed bet', {
+            betId,
+            gameSessionId,
+            error: error.message
+          });
+          // Continue processing other bets
+          continue;
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to activate placed bets', {
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get active bet details by ID
+   * @param {string} gameSessionId - Current game session ID
+   * @param {string} betId - Bet ID to retrieve
+   * @returns {Promise<Object>} Bet details if found
+   */
+  async getActiveBet(gameSessionId, betId) {
+    try {
+      const client = await this.ensureClientReady();
+      const betKey = `game:${gameSessionId}:bets`;
+      const betData = await client.hGetAll(`${betKey}:${betId}`);
+      
+      if (!betData || Object.keys(betData).length === 0) {
+        return null;
+      }
+
+      // Parse any JSON fields
+      Object.entries(betData).forEach(([key, value]) => {
+        try {
+          betData[key] = JSON.parse(value);
+        } catch {
+          // Keep as is if not JSON
+          betData[key] = value;
+        }
+      });
+
+      return { ...betData, id: betId };
+    } catch (error) {
+      logger.error('Failed to get active bet', {
         gameSessionId,
         betId,
         error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process manual cashout for an active bet
+   * @param {string} gameSessionId - Current game session ID
+   * @param {string} betId - Bet ID to cash out
+   * @param {number} multiplier - Current game multiplier
+   * @returns {Promise<Object>} Cashout result
+   */
+  async processManualCashout(gameSessionId, betId, multiplier) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get bet details
+      const bet = await this.getActiveBet(gameSessionId, betId);
+      if (!bet) {
+        throw new Error('Bet not found or not active');
+      }
+
+      // Calculate cashout amount
+      const cashoutAmount = parseFloat(bet.amount) * multiplier;
+      
+      // Update bet status
+      const betKey = `game:${gameSessionId}:bets`;
+      await this.hset(`${betKey}:${betId}`, {
+        ...bet,
+        status: 'WON',
+        cashoutMultiplier: multiplier,
+        cashoutAmount,
+        cashoutTime: new Date().toISOString(),
+        cashoutType: 'manual'
+      });
+
+      // Remove from active bets
+      await this.srem(`game:${gameSessionId}:active_bets`, betId);
+      
+      // Add to won bets
+      await this.sadd(`game:${gameSessionId}:won_bets`, betId);
+
+      logger.info('Manual cashout processed', {
+        gameSessionId,
+        betId,
+        userId: bet.userId,
+        multiplier,
+        cashoutAmount
+      });
+
+      return {
+        success: true,
+        betId,
+        userId: bet.userId,
+        amount: bet.amount,
+        cashoutAmount,
+        multiplier
+      };
+    } catch (error) {
+      logger.error('Failed to process manual cashout', {
+        gameSessionId,
+        betId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process auto cashout for active bets
+   * @param {string} gameSessionId - Current game session ID
+   * @param {number} currentMultiplier - Current game multiplier
+   * @returns {Promise<Array>} Array of processed cashouts
+   */
+  async processAutoCashouts(gameSessionId, currentMultiplier) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get all active bets
+      const activeBets = await client.sMembers(`game:${gameSessionId}:active_bets`);
+      const results = {
+        processed: [],
+        failed: []
+      };
+
+      for (const betId of activeBets) {
+        try {
+          const bet = await this.getActiveBet(gameSessionId, betId);
+          if (!bet || !bet.autoCashoutAt) continue;
+
+          // Check if we should auto cashout
+          if (currentMultiplier >= parseFloat(bet.autoCashoutAt)) {
+            // Process the auto cashout
+            const cashoutAmount = parseFloat(bet.amount) * parseFloat(bet.autoCashoutAt);
+            
+            // Update bet status
+            const betKey = `game:${gameSessionId}:bets`;
+            await this.hset(`${betKey}:${betId}`, {
+              ...bet,
+              status: 'WON',
+              cashoutMultiplier: bet.autoCashoutAt,
+              cashoutAmount,
+              cashoutTime: new Date().toISOString(),
+              cashoutType: 'auto'
+            });
+
+            // Remove from active bets
+            await this.srem(`game:${gameSessionId}:active_bets`, betId);
+            
+            // Add to won bets
+            await this.sadd(`game:${gameSessionId}:won_bets`, betId);
+
+            results.processed.push({
+              betId,
+              userId: bet.userId,
+              amount: bet.amount,
+              cashoutAmount,
+              multiplier: bet.autoCashoutAt
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to process auto cashout for bet', {
+            gameSessionId,
+            betId,
+            error: error.message
+          });
+          results.failed.push({ betId, error: error.message });
+        }
+      }
+
+      logger.info('Auto cashouts processed', {
+        gameSessionId,
+        processedCount: results.processed.length,
+        failedCount: results.failed.length
+      });
+
+      return results;
+    } catch (error) {
+      logger.error('Failed to process auto cashouts', {
+        gameSessionId,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clear all placed bets from storage
+   * @returns {Promise<void>}
+   */
+  async clearPlacedBets() {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBetsKey = 'bets:placed';
+      
+      // Get all placed bets first
+      const placedBets = await client.sMembers(placedBetsKey);
+      
+      // Delete each bet's hash
+      for (const betId of placedBets) {
+        await client.del(`bet:${betId}`);
+      }
+      
+      // Clear the placed bets set
+      await client.del(placedBetsKey);
+
+      logger.info('Cleared placed bets', {
+        clearedBetsCount: placedBets.length
+      });
+    } catch (error) {
+      logger.error('Failed to clear placed bets', {
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clear active bets for a specific game session
+   * @param {string} gameSessionId - Game session to clear active bets for
+   * @returns {Promise<void>}
+   */
+  async clearActiveBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      const activeBetsKey = `game:${gameSessionId}:active_bets`;
+      
+      // Get all active bets first
+      const activeBets = await client.sMembers(activeBetsKey);
+      
+      // Delete each bet's hash
+      for (const betId of activeBets) {
+        await client.del(`game:${gameSessionId}:bets:${betId}`);
+      }
+      
+      // Clear the active bets set
+      await client.del(activeBetsKey);
+
+      logger.info('Cleared active bets for game session', {
+        gameSessionId,
+        clearedBetsCount: activeBets.length
+      });
+    } catch (error) {
+      logger.error('Failed to clear active bets', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clear all bet-related keys for a game session
+   * @param {string} gameSessionId - Game session to clear
+   * @returns {Promise<void>}
+   */
+  async clearAllGameBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get all keys related to this game session
+      const gameKeys = await client.keys(`game:${gameSessionId}:*`);
+      
+      if (gameKeys.length > 0) {
+        // Delete all game-related keys
+        await client.del(gameKeys);
+      }
+
+      logger.info('Cleared all bet keys for game session', {
+        gameSessionId,
+        clearedKeysCount: gameKeys.length
+      });
+    } catch (error) {
+      logger.error('Failed to clear game session bets', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clear all placed bets from storage
+   * @returns {Promise<void>}
+   */
+  async clearPlacedBets() {
+    try {
+      const client = await this.ensureClientReady();
+      const placedBetsKey = 'bets:placed';
+      
+      // Get all placed bets first
+      const placedBets = await client.sMembers(placedBetsKey);
+      
+      // Delete each bet's hash and related keys
+      for (const betId of placedBets) {
+        await client.del(`bet:${betId}`);
+        await client.sRem(placedBetsKey, betId);
+      }
+      
+      // Clear the placed bets set
+      await client.del(placedBetsKey);
+
+      logger.info('Cleared placed bets storage', {
+        clearedBetsCount: placedBets.length
+      });
+    } catch (error) {
+      logger.error('Failed to clear placed bets', {
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clear active bets for a specific game session
+   * @param {string} gameSessionId - Game session to clear active bets for
+   * @returns {Promise<void>}
+   */
+  async clearActiveBets(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      const activeBetsKey = `game:${gameSessionId}:active_bets`;
+      const betPrefix = `game:${gameSessionId}:bets`;
+      
+      // Get all active bets first
+      const activeBets = await client.sMembers(activeBetsKey);
+      
+      // Delete each bet's hash and related keys
+      const pipeline = client.multi();
+      for (const betId of activeBets) {
+        // Delete bet hash
+        pipeline.del(`${betPrefix}:${betId}`);
+        
+        // Remove from active bets set
+        pipeline.sRem(activeBetsKey, betId);
+        
+        // Remove from user's active bets if it exists
+        const bet = await client.hGetAll(`${betPrefix}:${betId}`);
+        if (bet.userId) {
+          pipeline.sRem(`user:${bet.userId}:active_bets`, betId);
+        }
+      }
+      
+      // Clear the active bets set
+      pipeline.del(activeBetsKey);
+      
+      // Execute all commands
+      await pipeline.exec();
+
+      logger.info('Cleared active bets for game session', {
+        gameSessionId,
+        clearedBetsCount: activeBets.length
+      });
+    } catch (error) {
+      logger.error('Failed to clear active bets', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Sync Redis bets with database and clear stale bets
+   * @param {string} gameSessionId - Current game session ID
+   * @returns {Promise<void>}
+   */
+  async syncBetsWithDatabase(gameSessionId) {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get all Redis active bets
+      const activeBetsKey = `game:${gameSessionId}:active_bets`;
+      const activeBets = await client.sMembers(activeBetsKey);
+      
+      // Get all Redis placed bets
+      const placedBetsKey = 'bets:placed';
+      const placedBets = await client.sMembers(placedBetsKey);
+
+      // Get all bet details
+      const allBets = [...activeBets, ...placedBets];
+      const betDetails = [];
+      
+      for (const betId of allBets) {
+        const bet = await client.hGetAll(`game:${gameSessionId}:bets`);
+        if (bet) {
+          betDetails.push({
+            betId,
+            ...bet,
+            createdAt: new Date(bet.createdAt)
+          });
+        }
+      }
+
+      // Find stale bets (older than 1 hour)
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const staleBets = betDetails.filter(bet => bet.createdAt < oneHourAgo);
+
+      // Clear stale bets
+      if (staleBets.length > 0) {
+        const pipeline = client.multi();
+        
+        for (const bet of staleBets) {
+          // Remove from active bets
+          pipeline.sRem(activeBetsKey, bet.betId);
+          
+          // Remove from placed bets
+          pipeline.sRem(placedBetsKey, bet.betId);
+          
+          // Remove bet hash
+          pipeline.del(`game:${gameSessionId}:bets:${bet.betId}`);
+          
+          // Remove from user's active bets
+          if (bet.userId) {
+            pipeline.sRem(`user:${bet.userId}:active_bets`, bet.betId);
+          }
+        }
+        
+        await pipeline.exec();
+
+        logger.info('Cleared stale bets', {
+          gameSessionId,
+          clearedBetsCount: staleBets.length,
+          staleBetIds: staleBets.map(b => b.betId)
+        });
+      }
+
+      // Log sync results
+      logger.info('Bet sync completed', {
+        gameSessionId,
+        activeBetsCount: activeBets.length,
+        placedBetsCount: placedBets.length,
+        staleBetsCleared: staleBets.length
+      });
+    } catch (error) {
+      logger.error('Failed to sync bets with database', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Manually clear all bets from Redis
+   * @returns {Promise<void>}
+   */
+  async manualClearAllBets() {
+    try {
+      const client = await this.ensureClientReady();
+      
+      // Get all game session related keys
+      const gameKeys = await client.keys('game:*');
+      const placedBetsKey = 'bets:placed';
+      const userBetKeys = await client.keys('user:*:active_bets');
+      
+      // Delete all keys in a pipeline
+      if (gameKeys.length > 0 || userBetKeys.length > 0) {
+        const pipeline = client.multi();
+        
+        // Delete all game related keys
+        for (const key of gameKeys) {
+          pipeline.del(key);
+        }
+        
+        // Delete placed bets set
+        pipeline.del(placedBetsKey);
+        
+        // Delete all user bet keys
+        for (const key of userBetKeys) {
+          pipeline.del(key);
+        }
+        
+        await pipeline.exec();
+      }
+
+      logger.info('Manually cleared all bets from Redis', {
+        gameKeysCleared: gameKeys.length,
+        userBetKeysCleared: userBetKeys.length
+      });
+    } catch (error) {
+      logger.error('Failed to manually clear bets', {
+        error: error.message,
+        stack: error.stack
       });
       throw error;
     }

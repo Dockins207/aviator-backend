@@ -308,7 +308,7 @@ class BetService {
    * @returns {Object} Validated bet amount and auto cashout settings
    */
   async validateBetData(betDetails) {
-    const { amount, autoCashoutEnabled, autoCashoutMultiplier } = betDetails;
+    const { amount, autoCashoutAt } = betDetails;
 
     // Validate bet amount
     if (!amount || isNaN(amount) || amount <= 0) {
@@ -318,20 +318,26 @@ class BetService {
       });
     }
 
-    // Validate auto cashout settings if enabled
-    if (autoCashoutEnabled) {
-      if (!autoCashoutMultiplier || isNaN(autoCashoutMultiplier) || autoCashoutMultiplier <= 1.0) {
+    // Validate auto cashout settings if provided
+    let autoCashoutEnabled = false;
+    let autoCashoutMultiplier = null;
+
+    if (autoCashoutAt) {
+      const multiplier = parseFloat(autoCashoutAt);
+      if (isNaN(multiplier) || multiplier <= 1.0) {
         throw new ValidationError('INVALID_AUTO_CASHOUT_MULTIPLIER', {
           message: 'Auto cashout multiplier must be greater than 1.0',
-          autoCashoutMultiplier
+          autoCashoutAt
         });
       }
+      autoCashoutEnabled = true;
+      autoCashoutMultiplier = multiplier;
     }
 
     return {
       amount: parseFloat(amount),
-      autoCashoutEnabled: !!autoCashoutEnabled,
-      autoCashoutMultiplier: autoCashoutEnabled ? parseFloat(autoCashoutMultiplier) : null
+      autoCashoutEnabled,
+      autoCashoutMultiplier
     };
   }
 
@@ -448,20 +454,12 @@ class BetService {
    * @throws {Error} For any deviation from strict security requirements
    * @returns {Object} Validated and processed bet
    */
-  async placeBet(betDetails, req = {}, cashoutStrategy = 'default') {
+  async placeBet(betDetails, req = {}) {
     try {
       // Validate bet details
       if (!betDetails || typeof betDetails !== 'object') {
         throw new ValidationError('INVALID_BET_DETAILS', {
           message: 'Invalid bet details provided'
-        });
-      }
-
-      // Extract amount from either amount or betAmount field
-      const amount = betDetails.amount || betDetails.betAmount;
-      if (!amount || isNaN(amount) || amount <= 0) {
-        throw new ValidationError('INVALID_BET_AMOUNT', {
-          message: 'Invalid bet amount'
         });
       }
 
@@ -475,14 +473,19 @@ class BetService {
       // Get current game session
       const gameService = await this.getGameService();
       const currentGameSession = gameService.getCurrentGameSession();
-      
+
+      // Validate session
       if (!currentGameSession || !currentGameSession.id) {
         throw new ValidationError('INVALID_GAME_SESSION', {
           message: 'No valid game session found'
         });
       }
 
-      // Validate wallet and balance
+      // Validate bet data including auto cashout
+      const validatedData = await this.validateBetData(betDetails);
+      const { amount, autoCashoutEnabled, autoCashoutMultiplier } = validatedData;
+
+      // Verify wallet balance
       const wallet = await this.walletService.getWallet(req.user.user_id);
       if (!wallet) {
         throw new ValidationError('WALLET_NOT_FOUND', {
@@ -496,51 +499,39 @@ class BetService {
         });
       }
 
-      // Generate bet ID
+      // Generate unique bet ID
       const betId = uuidv4();
-
-      // Determine bet status based on game state
-      let betStatus;
-      let additionalData = {};
-
-      switch (currentGameSession.status) {
-        case GameState.BETTING:
-          betStatus = BetState.ACTIVE;
-          break;
-        case GameState.FLYING:
-        case GameState.CRASHED:
-          betStatus = BetState.PLACED;
-          additionalData.queueReason = currentGameSession.status === GameState.FLYING ? 
-            'GAME_IN_PROGRESS' : 'GAME_CRASHED';
-          break;
-        default:
-          betStatus = BetState.PLACED;
-          additionalData.queueReason = 'UNKNOWN_STATE';
-      }
 
       // Create initial bet state
       const bet = {
         id: betId,
         userId: req.user.user_id,
         amount: amount,
-        status: betStatus,
+        status: 'PLACED',
         gameSessionId: currentGameSession.id,
         createdAt: new Date().toISOString(),
-        autoCashoutAt: betDetails.autoCashoutAt || null,
-        autoRequeue: betDetails.autoRequeue || false,
+        autoCashoutEnabled,
+        autoCashoutAt: autoCashoutEnabled ? autoCashoutMultiplier : null,
         userDetails: {
           username: req.user.username,
           role: req.user.role
-        },
-        ...additionalData
+        }
       };
 
-      // Store bet in Redis
-      await this.redisRepository.storeBet(currentGameSession.id, bet);
+      // Check game state and store bet accordingly
+      if (currentGameSession.status === 'betting') {
+        // Store as active bet
+        bet.status = 'ACTIVE';
+        await this.redisRepository.storeBet(currentGameSession.id, bet);
+        await this.redisRepository.addActiveBetToSet(currentGameSession.id, betId);
 
-      // If bet is active, add it to active bets set
-      if (betStatus === BetState.ACTIVE) {
-        await this.redisRepository.addActiveBet(currentGameSession.id, betId);
+        // Start auto-cashout monitoring if enabled
+        if (autoCashoutEnabled) {
+          await this._startAutoCashoutMonitoring(currentGameSession.id);
+        }
+      } else {
+        // Store as placed bet for next session
+        await this.redisRepository.storePlacedBet(bet);
       }
 
       // Update wallet balance
@@ -552,21 +543,24 @@ class BetService {
         userId: req.user.user_id,
         amount,
         gameSessionId: currentGameSession.id,
-        status: betStatus,
+        status: bet.status,
+        autoCashoutEnabled,
+        autoCashoutAt: bet.autoCashoutAt,
         gameState: currentGameSession.status
       });
 
       return {
         success: true,
         betId,
-        status: betStatus,
-        message: betStatus === BetState.ACTIVE ? 
-          'Bet placed and activated successfully' : 
-          'Bet placed and queued for next betting phase'
+        status: bet.status,
+        autoCashoutEnabled,
+        autoCashoutAt: bet.autoCashoutAt,
+        message: bet.status === 'ACTIVE' ? 
+          'Bet placed and activated for current session' : 
+          'Bet placed and will be activated in next betting phase'
       };
 
     } catch (error) {
-      // Log the error with full context
       logger.error('BET_PLACEMENT_ERROR', {
         errorType: error.constructor.name,
         errorMessage: error.message,
@@ -575,14 +569,12 @@ class BetService {
         betDetails
       });
 
-      // Format error response
       const formattedError = {
         success: false,
         message: error.message || 'Failed to place bet',
         code: error.code || 'BET_PLACEMENT_ERROR'
       };
 
-      // Add status code for HTTP responses
       if (error instanceof ValidationError) {
         formattedError.status = 400;
       } else {
@@ -984,7 +976,7 @@ class BetService {
         }
       }
 
-      // Stop auto cashout monitoring
+      // Stop auto-cashout monitoring
       await this._stopAutoCashoutMonitoring(gameId);
 
       return results;
@@ -1118,175 +1110,162 @@ class BetService {
   }
 
   /**
-   * Handle game state transitions and manage bet states
-   * @param {string} gameId - Game session identifier
-   * @param {string} newState - New game state
-   * @returns {Promise<Object>} State transition results
+   * Start monitoring for auto cashouts in a game session
+   * @param {string} gameSessionId - Game session to monitor
+   * @private
    */
-  async handleGameStateTransition(gameId, newState) {
-    this.logger.info('GAME_STATE_TRANSITION', {
-      gameId,
-      newState,
-      timestamp: new Date().toISOString()
-    });
-
-    if (newState === this.GAME_STATES.FLYING) {
-      // Start monitoring multiplier for auto cashouts
-      this._startAutoCashoutMonitoring(gameId);
-    } else if (newState === this.GAME_STATES.CRASHED) {
-      // Clean up auto cashout monitoring
-      this._stopAutoCashoutMonitoring(gameId);
-    }
-
-    return { success: true, gameId, newState };
-  }
-
-  _stopAutoCashoutMonitoring(gameId) {
-    if (this._autoCashoutIntervals?.has(gameId)) {
-      clearInterval(this._autoCashoutIntervals.get(gameId));
-      this._autoCashoutIntervals.delete(gameId);
-    }
-  }
-
-  async _startAutoCashoutMonitoring(gameId) {
-    // Clean up any existing interval for this game
-    this._stopAutoCashoutMonitoring(gameId);
-
-    const checkInterval = setInterval(async () => {
-      try {
-        const gameState = await (await this.getGameService()).getCurrentGameState();
-        
-        // Stop monitoring if game is no longer flying
-        if (gameState.state !== this.GAME_STATES.FLYING) {
-          this._stopAutoCashoutMonitoring(gameId);
-          return;
-        }
-
-        const currentMultiplier = gameState.multiplier;
-        const activeBetIds = await this.redisRepository.smembers(`game:${gameId}:activeBets`);
-
-        // Process auto cashouts
-        for (const betId of activeBetIds) {
-          try {
-            const bet = await this.redisRepository.hgetall(`bet:${betId}`);
-            
-            if (bet.autoCashoutEnabled && parseFloat(bet.autoCashoutMultiplier) <= currentMultiplier) {
-              // Create a mock request object for processCashout
-              const mockReq = { user: { user_id: bet.userId } };
-              await this.processCashout(mockReq, currentMultiplier, true);
-            }
-          } catch (error) {
-            this.logger.error('AUTO_CASHOUT_PROCESSING_ERROR', {
-              betId,
-              gameId,
-              multiplier: currentMultiplier,
-              error: error.message
-            });
-          }
-        }
-      } catch (error) {
-        this.logger.error('AUTO_CASHOUT_MONITORING_ERROR', {
-          gameId,
-          error: error.message,
-          stack: error.stack
-        });
+  async _startAutoCashoutMonitoring(gameSessionId) {
+    try {
+      // Check if monitoring is already active
+      if (this._autoCashoutMonitoring?.[gameSessionId]) {
+        return;
       }
-    }, 100); // Check every 100ms
 
-    // Store the interval for cleanup
-    this._autoCashoutIntervals = this._autoCashoutIntervals || new Map();
-    this._autoCashoutIntervals.set(gameId, checkInterval);
+      // Initialize monitoring state
+      if (!this._autoCashoutMonitoring) {
+        this._autoCashoutMonitoring = {};
+      }
+
+      // Set up monitoring interval
+      this._autoCashoutMonitoring[gameSessionId] = setInterval(async () => {
+        try {
+          const gameService = await this.getGameService();
+          const gameState = await gameService.getCurrentGameState();
+          
+          if (gameState && gameState.multiplier) {
+            const currentMultiplier = parseFloat(gameState.multiplier);
+            await this.processAutoCashouts(gameSessionId, currentMultiplier);
+          }
+        } catch (error) {
+          logger.error('AUTO_CASHOUT_MONITORING_ERROR', {
+            gameSessionId,
+            error: error.message,
+            stack: error.stack
+          });
+        }
+      }, 100); // Check every 100ms
+
+      logger.info('Started auto cashout monitoring', { gameSessionId });
+    } catch (error) {
+      logger.error('Failed to start auto cashout monitoring', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+    }
   }
 
   /**
-   * Handle the start of betting state
-   * @param {string} gameId - Game session identifier
-   * @returns {Promise<Object>} Betting state initialization results
+   * Process auto cashouts for active bets
+   * @param {string} gameSessionId - Game session ID
+   * @param {number} currentMultiplier - Current game multiplier
+   * @private
    */
-  async handleBettingStateStart(gameId) {
+  async processAutoCashouts(gameSessionId, currentMultiplier) {
     try {
-      // Step 1: Activate all queued bets from previous session
-      const activationResults = await this.redisRepository.bulkActivateQueuedBets(gameId);
-      
-      // Step 2: Process successful activations
-      if (activationResults.success.length > 0) {
-        // Update user stats and send notifications in parallel
-        const updatePromises = activationResults.success.map(async (bet) => {
-          try {
-            // Update user betting stats
-            await this.statsService.updateUserBettingStats(bet.userId, {
-              activeBetsCount: 1,
-              lastBetTime: new Date().toISOString()
-            });
+      // Get all active bets for this session
+      const activeBets = await this.redisRepository.getActiveBets(gameSessionId);
 
-            // Send notification to user
-            await this.notificationService.notifyUser(bet.userId, {
-              type: 'BET_ACTIVATED',
-              data: {
-                betId: bet.id,
-                gameId,
-                amount: bet.amount,
-                timestamp: new Date().toISOString()
-              }
-            });
-          } catch (error) {
-            this.logger.error('BET_ACTIVATION_UPDATE_ERROR', {
+      for (const bet of activeBets) {
+        try {
+          if (bet.autoCashoutEnabled && bet.autoCashoutAt && currentMultiplier >= parseFloat(bet.autoCashoutAt)) {
+            // Create cashout request
+            const cashoutRequest = {
               betId: bet.id,
               userId: bet.userId,
-              error: error.message
+              multiplier: currentMultiplier
+            };
+
+            // Process the auto cashout
+            await this.processCashout(cashoutRequest, { user: { user_id: bet.userId } });
+
+            logger.info('Auto cashout processed', {
+              betId: bet.id,
+              userId: bet.userId,
+              targetMultiplier: bet.autoCashoutAt,
+              actualMultiplier: currentMultiplier,
+              gameSessionId
             });
           }
-        });
-
-        // Wait for all updates to complete
-        await Promise.allSettled(updatePromises);
+        } catch (betError) {
+          logger.error('Failed to process auto cashout for bet', {
+            betId: bet.id,
+            userId: bet.userId,
+            error: betError.message,
+            stack: betError.stack
+          });
+        }
       }
+    } catch (error) {
+      logger.error('Failed to process auto cashouts', {
+        gameSessionId,
+        currentMultiplier,
+        error: error.message,
+        stack: error.stack
+      });
+    }
+  }
 
-      // Step 3: Handle failed activations
-      if (activationResults.failed.length > 0) {
-        this.logger.error('QUEUED_BETS_ACTIVATION_FAILURES', {
-          gameId,
-          failedBets: activationResults.failed
-        });
-
-        // Attempt to refund failed bets
-        const refundPromises = activationResults.failed.map(async (bet) => {
-          try {
-            await this.walletService.refundFailedBet(bet.userId, bet.amount);
-            this.logger.info('FAILED_BET_REFUNDED', {
-              betId: bet.id,
-              userId: bet.userId,
-              amount: bet.amount
-            });
-          } catch (refundError) {
-            this.logger.error('BET_REFUND_FAILED', {
-              betId: bet.id,
-              userId: bet.userId,
-              amount: bet.amount,
-              error: refundError.message
-            });
-          }
-        });
-
-        await Promise.allSettled(refundPromises);
+  /**
+   * Stop auto cashout monitoring for a game session
+   * @param {string} gameSessionId - Game session to stop monitoring
+   * @private
+   */
+  async _stopAutoCashoutMonitoring(gameSessionId) {
+    try {
+      if (this._autoCashoutMonitoring?.[gameSessionId]) {
+        clearInterval(this._autoCashoutMonitoring[gameSessionId]);
+        delete this._autoCashoutMonitoring[gameSessionId];
+        logger.info('Stopped auto cashout monitoring', { gameSessionId });
       }
+    } catch (error) {
+      logger.error('Failed to stop auto cashout monitoring', {
+        gameSessionId,
+        error: error.message,
+        stack: error.stack
+      });
+    }
+  }
 
-      // Log final results
-      this.logger.info('BETTING_STATE_INITIALIZATION_COMPLETE', {
-        gameId,
-        activatedBets: activationResults.success.length,
-        failedBets: activationResults.failed.length,
+  /**
+   * Handle game state transitions
+   * @param {string} gameSessionId - Game session ID
+   * @param {string} newState - New game state
+   */
+  async handleGameStateTransition(gameSessionId, newState) {
+    try {
+      logger.info('Game state transition', {
+        gameSessionId,
+        newState,
         timestamp: new Date().toISOString()
       });
 
-      return {
-        handled: true,
-        state: this.GAME_STATES.BETTING,
-        results: activationResults
-      };
+      switch (newState) {
+        case 'betting':
+          // No clearing needed in betting state
+          break;
+
+        case 'flying':
+          // Clear placed bets and start monitoring
+          await this.redisRepository.clearPlacedBets();
+          await this._startAutoCashoutMonitoring(gameSessionId);
+          break;
+        
+        case 'crashed':
+          // Stop monitoring and clear active bets
+          await this._stopAutoCashoutMonitoring(gameSessionId);
+          await this.redisRepository.clearActiveBets(gameSessionId);
+          break;
+      }
+
+      logger.info('Game state transition completed', {
+        gameSessionId,
+        newState
+      });
     } catch (error) {
-      this.logger.error('BETTING_STATE_INITIALIZATION_ERROR', {
-        gameId,
+      logger.error('GAME_STATE_TRANSITION_ERROR', {
+        gameSessionId,
+        newState,
         error: error.message,
         stack: error.stack
       });
@@ -1295,40 +1274,139 @@ class BetService {
   }
 
   /**
-   * Handle game state transitions and manage bet states
-   * @param {string} gameId - Game session identifier
-   * @param {string} newState - New game state
-   * @returns {Promise<Object>} State transition results
+   * Process manual cashout request
+   * @param {string} betId - ID of bet to cash out
+   * @param {string} userId - User requesting cashout
+   * @param {number} currentMultiplier - Current game multiplier
+   * @returns {Promise<Object>} Cashout result
    */
-  async handleGameStateTransition(gameId, newState) {
+  async processCashout(betId, userId, currentMultiplier) {
     try {
-      this.logger.info('GAME_STATE_TRANSITION', {
-        gameId,
-        newState,
-        timestamp: new Date().toISOString()
+      // Get current game session
+      const gameService = await this.getGameService();
+      const currentGameSession = gameService.getCurrentGameSession();
+      
+      if (!currentGameSession || !currentGameSession.id) {
+        throw new Error('No active game session');
+      }
+
+      if (currentGameSession.status !== 'flying') {
+        throw new Error('Cashout only available during flying state');
+      }
+
+      // Process the cashout
+      const result = await this.redisRepository.processManualCashout(
+        currentGameSession.id,
+        betId,
+        currentMultiplier
+      );
+
+      // Update wallet balance
+      await this.walletService.processCashout(
+        userId,
+        result.cashoutAmount,
+        currentGameSession.id
+      );
+
+      // Update stats
+      await this.statsService.recordCashout({
+        userId,
+        betId,
+        amount: result.amount,
+        cashoutAmount: result.cashoutAmount,
+        multiplier: result.multiplier,
+        gameSessionId: currentGameSession.id,
+        type: 'manual'
       });
 
-      switch (newState) {
-        case this.GAME_STATES.BETTING:
-          return await this.handleBettingStateStart(gameId);
-        
-        case this.GAME_STATES.FLYING:
-          return await this.handleFlyingStateStart(gameId);
-        
-        case this.GAME_STATES.CRASHED:
-          return await this.handleGameCrash(gameId);
-        
-        default:
-          this.logger.warn('UNHANDLED_GAME_STATE', {
-            gameId,
-            state: newState
-          });
-          return { handled: false, state: newState };
-      }
+      return {
+        success: true,
+        ...result
+      };
     } catch (error) {
-      this.logger.error('GAME_STATE_TRANSITION_ERROR', {
-        gameId,
-        newState,
+      logger.error('CASHOUT_ERROR', {
+        betId,
+        userId,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Process auto cashouts for current game session
+   * @param {number} currentMultiplier - Current game multiplier
+   * @returns {Promise<Object>} Auto cashout results
+   */
+  async processAutoCashouts(currentMultiplier) {
+    try {
+      // Get current game session
+      const gameService = await this.getGameService();
+      const currentGameSession = gameService.getCurrentGameSession();
+      
+      if (!currentGameSession || !currentGameSession.id) {
+        throw new Error('No active game session');
+      }
+
+      // Process auto cashouts
+      const results = await this.redisRepository.processAutoCashouts(
+        currentGameSession.id,
+        currentMultiplier
+      );
+
+      // Process successful cashouts
+      for (const cashout of results.processed) {
+        try {
+          // Update wallet balance
+          await this.walletService.processCashout(
+            cashout.userId,
+            cashout.cashoutAmount,
+            currentGameSession.id
+          );
+
+          // Update stats
+          await this.statsService.recordCashout({
+            userId: cashout.userId,
+            betId: cashout.betId,
+            amount: cashout.amount,
+            cashoutAmount: cashout.cashoutAmount,
+            multiplier: cashout.multiplier,
+            gameSessionId: currentGameSession.id,
+            type: 'auto'
+          });
+        } catch (error) {
+          logger.error('AUTO_CASHOUT_PROCESSING_ERROR', {
+            cashout,
+            error: error.message
+          });
+        }
+      }
+
+      return results;
+    } catch (error) {
+      logger.error('AUTO_CASHOUTS_ERROR', {
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Manually clear all bets from Redis
+   * For testing/maintenance only
+   * @returns {Promise<Object>}
+   */
+  async manualClearAllBets() {
+    try {
+      await this.redisRepository.manualClearAllBets();
+      return {
+        success: true,
+        message: 'All bets cleared from Redis'
+      };
+    } catch (error) {
+      logger.error('Manual bet clear failed', {
         error: error.message,
         stack: error.stack
       });
