@@ -33,14 +33,14 @@ class BetService {
     this.statsService = statsService;
     this.wagerMonitorService = wagerMonitorService;
     this.gameRepository = gameRepository;
+    this.gameService = null;
   }
 
   async getGameService() {
-    if (!this._gameService) {
-      const { default: gameService } = await import('./gameService.js');
-      this._gameService = gameService;
+    if (!this.gameService) {
+      this.gameService = await import('./gameService.js').then(module => module.default);
     }
-    return this._gameService;
+    return this.gameService;
   }
 
   // Rest of the class remains the same
@@ -1276,142 +1276,44 @@ class BetService {
   /**
    * Process manual cashout request
    * @param {string} betId - ID of bet to cash out
-   * @param {string} userId - User requesting cashout
    * @param {number} currentMultiplier - Current game multiplier
+   * @param {Object} socket - Socket object
    * @returns {Promise<Object>} Cashout result
    */
-  async processCashout(betId, userId, currentMultiplier) {
+  async processCashout(betId, currentMultiplier, socket) {
     try {
-      // Get current game session
-      const gameService = await this.getGameService();
-      const currentGameSession = gameService.getCurrentGameSession();
-      
-      if (!currentGameSession || !currentGameSession.id) {
-        throw new Error('No active game session');
-      }
-
-      if (currentGameSession.status !== 'flying') {
-        throw new Error('Cashout only available during flying state');
-      }
-
       // Process the cashout
-      const result = await this.redisRepository.processManualCashout(
-        currentGameSession.id,
-        betId,
-        currentMultiplier
-      );
-
-      // Update wallet balance
-      await this.walletService.processCashout(
-        userId,
-        result.cashoutAmount,
-        currentGameSession.id
-      );
-
-      // Update stats
-      await this.statsService.recordCashout({
-        userId,
-        betId,
-        amount: result.amount,
-        cashoutAmount: result.cashoutAmount,
-        multiplier: result.multiplier,
-        gameSessionId: currentGameSession.id,
-        type: 'manual'
-      });
-
-      return {
-        success: true,
-        ...result
-      };
-    } catch (error) {
-      logger.error('CASHOUT_ERROR', {
-        betId,
-        userId,
-        error: error.message,
-        stack: error.stack
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Process auto cashouts for current game session
-   * @param {number} currentMultiplier - Current game multiplier
-   * @returns {Promise<Object>} Auto cashout results
-   */
-  async processAutoCashouts(currentMultiplier) {
-    try {
-      // Get current game session
-      const gameService = await this.getGameService();
-      const currentGameSession = gameService.getCurrentGameSession();
+      const result = await this._processCashoutTransaction(betId, currentMultiplier);
       
-      if (!currentGameSession || !currentGameSession.id) {
-        throw new Error('No active game session');
-      }
+      // Disable the cashout button for this user
+      await this.disableCashoutForUser(socket);
 
-      // Process auto cashouts
-      const results = await this.redisRepository.processAutoCashouts(
-        currentGameSession.id,
-        currentMultiplier
-      );
-
-      // Process successful cashouts
-      for (const cashout of results.processed) {
-        try {
-          // Update wallet balance
-          await this.walletService.processCashout(
-            cashout.userId,
-            cashout.cashoutAmount,
-            currentGameSession.id
-          );
-
-          // Update stats
-          await this.statsService.recordCashout({
-            userId: cashout.userId,
-            betId: cashout.betId,
-            amount: cashout.amount,
-            cashoutAmount: cashout.cashoutAmount,
-            multiplier: cashout.multiplier,
-            gameSessionId: currentGameSession.id,
-            type: 'auto'
-          });
-        } catch (error) {
-          logger.error('AUTO_CASHOUT_PROCESSING_ERROR', {
-            cashout,
-            error: error.message
-          });
-        }
-      }
-
-      return results;
+      return result;
     } catch (error) {
-      logger.error('AUTO_CASHOUTS_ERROR', {
+      logger.error('CASHOUT_PROCESSING_ERROR', {
         error: error.message,
-        stack: error.stack
+        betId,
+        currentMultiplier
       });
       throw error;
     }
   }
 
   /**
-   * Manually clear all bets from Redis
-   * For testing/maintenance only
-   * @returns {Promise<Object>}
+   * Get active bets for a user
+   * @param {string} gameSessionId - Game session ID
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} Active bets for the user
    */
-  async manualClearAllBets() {
-    try {
-      await this.redisRepository.manualClearAllBets();
-      return {
-        success: true,
-        message: 'All bets cleared from Redis'
-      };
-    } catch (error) {
-      logger.error('Manual bet clear failed', {
-        error: error.message,
-        stack: error.stack
-      });
-      throw error;
+  async getActiveBetsForCashout(gameSessionId, userId) {
+    // Fetch active bets from Redis or database based on the user ID
+    const activeBets = await this.gameRepository.findActiveBetsByUserId(userId);
+    
+    // Filter bets based on the game session if provided
+    if (gameSessionId) {
+      return activeBets.filter(bet => bet.gameSessionId === gameSessionId);
     }
+    return activeBets;
   }
 
   /**
@@ -1455,6 +1357,75 @@ class BetService {
     ]);
 
     return betId;
+  }
+
+  /**
+   * Handle game state changes and manage the cashout button state within the bet service
+   * @param {Object} gameState - Current game state
+   * @param {Object} socket - Socket object
+   */
+  async handleGameStateChange(gameState, socket) {
+    try {
+      const userId = socket.user.user_id;
+      
+      // Get active bets for the user
+      const activeBets = await this.getActiveBetsForCashout(null, userId);
+      
+      // Determine button state based on game state and active bets
+      const buttonState = {
+        cashOut: gameState.phase === 'FLYING' && activeBets.length > 0
+      };
+      
+      // Emit personalized button state to the user
+      socket.emit('gameStateUpdate', { buttonState });
+      
+    } catch (error) {
+      logger.error('GAME_STATE_CHANGE_ERROR', {
+        userId: socket.user?.user_id,
+        error: error.message,
+        stack: error.stack
+      });
+    }
+  }
+
+  /**
+   * Disable cashout after successful cashout
+   * @param {Object} socket - Socket object
+   */
+  async disableCashoutForUser(socket) {
+    socket.emit('gameStateUpdate', {
+      buttonState: {
+        placeBet: false,
+        cashOut: false,
+        nextAction: null
+      }
+    });
+  }
+
+  /**
+   * Process manual cashout request
+   * @param {string} betId - ID of bet to cash out
+   * @param {number} currentMultiplier - Current game multiplier
+   * @param {Object} socket - Socket object
+   * @returns {Promise<Object>} Cashout result
+   */
+  async processCashout(betId, currentMultiplier, socket) {
+    try {
+      // Process the cashout
+      const result = await this._processCashoutTransaction(betId, currentMultiplier);
+      
+      // Disable the cashout button for this user
+      await this.disableCashoutForUser(socket);
+
+      return result;
+    } catch (error) {
+      logger.error('CASHOUT_PROCESSING_ERROR', {
+        error: error.message,
+        betId,
+        currentMultiplier
+      });
+      throw error;
+    }
   }
 }
 

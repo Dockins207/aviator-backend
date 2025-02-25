@@ -138,23 +138,35 @@ class GameSocket {
     try {
       const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
 
-      this.io.emit('gameStateUpdate', {
-        status: 'flying',
-        gameId: gameState.gameId || null,
-        multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
-        countdown: 0,  
-        crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
-        players: playerCount,
-        buttonState: {
-          placeBet: false,   
-          cashOut: false,  
-          nextAction: null
-        },
-        flyingPhaseDetails: {
-          startTime: gameState.startTime || Date.now(),
-          elapsedTime: Date.now() - (gameState.startTime || Date.now())
-        }
-      });
+      // Get all sockets and their active bets
+      const sockets = await this.io.fetchSockets();
+      for (const socket of sockets) {
+        const userId = socket.user?.user_id;
+        if (!userId) continue;
+
+        // Check if user has active bets
+        const userActiveBets = gameState.activeBets.filter(bet => bet.userId === userId);
+        const hasActiveBets = userActiveBets.length > 0;
+
+        // Send personalized game state update to each user
+        socket.emit('gameStateUpdate', {
+          status: 'flying',
+          gameId: gameState.gameId || null,
+          multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
+          countdown: 0,  
+          crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+          players: playerCount,
+          buttonState: {
+            placeBet: false,   
+            cashOut: hasActiveBets,  // Enable cashout only if user has active bets
+            nextAction: hasActiveBets ? 'cashout' : null
+          },
+          flyingPhaseDetails: {
+            startTime: gameState.startTime || Date.now(),
+            elapsedTime: Date.now() - (gameState.startTime || Date.now())
+          }
+        });
+      }
     } catch (error) {
       logger.error('Error in broadcastFlyingPhase', {
         errorMessage: error.message,
@@ -163,25 +175,22 @@ class GameSocket {
     }
   }
 
-  broadcastCrashedPhase(gameState) {
+  async broadcastCrashedPhase(gameState) {
     try {
       const playerCount = Array.isArray(gameState.players) ? gameState.players.length : 0;
 
+      // Broadcast crashed state to all clients with disabled cashout button
       this.io.emit('gameStateUpdate', {
         status: 'crashed',
         gameId: gameState.gameId || null,
-        multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
-        countdown: 0,  
+        multiplier: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+        countdown: gameState.countdown || 5,
         crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
         players: playerCount,
         buttonState: {
-          placeBet: true,    
-          cashOut: false,    
-          nextAction: 'placeBet'
-        },
-        crashDetails: {
-          crashMultiplier: `@${gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00'}x`,
-          gameDuration: Date.now() - (gameState.startTime || Date.now())
+          placeBet: false,
+          cashOut: false,  // Disable cashout button on crash
+          nextAction: null
         }
       });
     } catch (error) {

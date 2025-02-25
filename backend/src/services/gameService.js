@@ -11,6 +11,7 @@ import cacheService from '../redis-services/cacheService.js';
 import notificationService from '../services/notificationService.js';
 import socketService from '../services/socketService.js';
 import gameReportingService from '../services/gameReportingService.js';
+import { EventEmitter } from 'events';
 
 // Custom error classes
 class GameStateError extends Error {
@@ -20,11 +21,13 @@ class GameStateError extends Error {
   }
 }
 
-class GameBoardService {
+class GameBoardService extends EventEmitter {
   static _instance = null;
   static _gameCycleInitialized = false;
 
   constructor() {
+    super(); // Initialize EventEmitter
+
     // Check if an instance already exists
     if (GameBoardService._instance) {
       return GameBoardService._instance;
@@ -290,6 +293,13 @@ class GameBoardService {
     this.gameState.status = 'flying';
     this.gameState.startTime = Date.now();
 
+    // Emit state change for bet service to handle button states
+    this.emit('stateChange', this.gameState);
+
+    // Get active bets count for the current game session
+    const activeBets = await RedisRepository.getBetsBySessionKey(this.gameState.gameId);
+    this.gameState.activeBets = activeBets || [];
+
     // Start multiplier calculation
     return new Promise((resolve, reject) => {
       this.multiplierInterval = setInterval(() => {
@@ -313,6 +323,24 @@ class GameBoardService {
         }
       }, 100);
     });
+  }
+
+  async runCrashedPhase() {
+    try {
+      // Update game state to crashed
+      this.gameState.status = 'crashed';
+      
+      // Emit state change for bet service to handle button states
+      this.emit('stateChange', this.gameState);
+
+      // Process crashed phase logic
+      await this.processCrashedPhase();
+    } catch (error) {
+      logger.error('Error in runCrashedPhase', {
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+    }
   }
 
   handleGameCrash() {

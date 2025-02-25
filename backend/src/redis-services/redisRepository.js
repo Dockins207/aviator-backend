@@ -2418,62 +2418,36 @@ class RedisRepository {
    * @returns {Array} List of active bets for the given user and session
    * @throws {Error} If session ID or user ID is invalid
    */
-  async getActiveUserBetsForSession(gameSessionId, userId) {
-    // Validate input parameters
-    if (!gameSessionId) {
-      logger.error('USER_ACTIVE_BETS_RETRIEVAL_REJECTED', {
-        reason: 'No game session ID provided',
-        context: 'getActiveUserBetsForSession'
-      });
-      
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('INVALID_GAME_SESSION_ID');
-      }
-    }
-
-    if (!userId) {
-      logger.error('USER_ACTIVE_BETS_RETRIEVAL_REJECTED', {
-        reason: 'No user ID provided',
-        gameSessionId
-      });
-      
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('INVALID_USER_ID');
-      }
-    }
-
+async getActiveUserBetsForSession(gameSessionId, userId) {
     try {
-      // Retrieve all active bets for the session
-      const activeBets = await this.getActiveBetsForSession(gameSessionId);
+        const activeBets = await this.retrieveActiveBets(gameSessionId, userId);
 
-      // Filter active bets for the specific user
-      const userActiveBets = activeBets.filter(bet => bet.userId === userId);
+        // Check if we have already logged for this game session
+        if (!this.loggedGameSessions.has(gameSessionId)) {
+            logger.info('ACTIVE_BETS_RETRIEVED', {
+                userId,
+                activeBetCount: activeBets.length,
+                timestamp: new Date().toISOString()
+            });
 
-      // Log user-specific active bets
-      logger.info('USER_ACTIVE_BETS_RETRIEVAL_SUMMARY', {
-        gameSessionId,
-        userId,
-        totalUserActiveBetsRetrieved: userActiveBets.length
-      });
+            // Add the game session ID to the logged sessions
+            this.loggedGameSessions.add(gameSessionId);
+        }
 
-      return userActiveBets;
+        return activeBets;
     } catch (error) {
-      logger.error('USER_ACTIVE_BETS_RETRIEVAL_ERROR', {
-        errorMessage: error.message,
-        gameSessionId,
-        userId,
-        errorStack: error.stack
-      });
-      
-      // In production, rethrow the error
-      if (process.env.NODE_ENV === 'production') {
-        throw error;
-      }
+        logger.error('ERROR_FINDING_ACTIVE_BETS_IN_REDIS', {
+            userId,
+            errorMessage: error.message,
+            errorName: error.name,
+            errorStack: error.stack,
+            timestamp: new Date().toISOString()
+        });
 
-      // In development, return an empty array
-      return [];
+        // Return empty array to prevent cascading failures
+        return [];
     }
-  }
+}
 
   /**
    * Retrieve active bets for cashout for a specific user in the current game session
