@@ -18,7 +18,6 @@ CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username VARCHAR(50) NOT NULL,
     phone_number VARCHAR(15) NOT NULL,
-    email VARCHAR(100),
     password_hash VARCHAR(255) NOT NULL,
     salt VARCHAR(50) NOT NULL,
     role user_role DEFAULT 'player',
@@ -35,7 +34,6 @@ CREATE TABLE users (
     -- Add explicit unique constraints
     CONSTRAINT unique_username UNIQUE (username),
     CONSTRAINT unique_phone_number UNIQUE (phone_number),
-    CONSTRAINT unique_email UNIQUE (email),
     CONSTRAINT unique_referral_code UNIQUE (referral_code)
 );
 

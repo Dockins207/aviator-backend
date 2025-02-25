@@ -5,7 +5,6 @@ import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import GameRepository from '../repositories/gameRepository.js';
 import redisRepository from '../redis-services/redisRepository.js';
-import statsService from '../services/statsService.js';
 import gameService from '../services/gameService.js';
 
 const router = express.Router();
@@ -129,7 +128,16 @@ router.post('/cashout',
         });
       }
 
-      const result = await betService.processCashout(req, parseFloat(multiplier));
+      // Use the authenticated user's ID
+      const userId = req.user?.user_id;
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'User not authenticated'
+        });
+      }
+
+      const result = await betService.processCashout(userId, parseFloat(multiplier), req.socket);
       
       res.status(200).json({
         success: true,
@@ -138,6 +146,7 @@ router.post('/cashout',
     } catch (error) {
       // Log and handle errors
       logger.error('CASHOUT_ERROR', {
+        service: 'aviator-backend',
         userId: req.user?.user_id,
         errorMessage: error.message,
         errorStack: error.stack
@@ -178,28 +187,5 @@ router.get('/current-bets',
     }
   }
 );
-
-export function initializeStatsService(io) {
-  // If io is not provided, do nothing
-  if (!io) return;
-
-  // Set up stats service
-  statsService.setSocketIO(io);
-
-  // Track online users and total bets
-  io.on('connection', (socket) => {
-    // Add user to online users when they connect
-    if (socket.user && socket.user.id) {
-      statsService.addOnlineUser(socket.user.id);
-    }
-
-    // Remove user from online users when they disconnect
-    socket.on('disconnect', () => {
-      if (socket.user && socket.user.id) {
-        statsService.removeOnlineUser(socket.user.id);
-      }
-    });
-  });
-}
 
 export default router;

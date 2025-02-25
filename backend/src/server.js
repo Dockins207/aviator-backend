@@ -10,17 +10,14 @@ import { pool, connectWithRetry } from './config/database.js';
 import { WalletRepository } from './repositories/walletRepository.js';
 import gameService from './services/gameService.js';
 import notificationService from './services/notificationService.js';
-import statsService from './services/statsService.js';
 import errorMiddleware from './middleware/errorMiddleware.js';
 import authRoutes from './routes/authRoutes.js';
 import gameRoutes from './routes/gameRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
 import betRoutes from './routes/betRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
-import { initializeStatsService } from './routes/betRoutes.js';
 import schedule from 'node-schedule';
 import { authService } from './services/authService.js';
-import wagerMonitorSocket from './sockets/wagerMonitorSocket.js';
 import redisRepository from './redis-services/redisRepository.js';
 import socketManager from './sockets/socketManager.js';
 
@@ -200,9 +197,6 @@ async function startServer() {
       // Explicitly set Socket.IO for notification service
       notificationService.setSocketIO(io);
       
-      // Explicitly set Socket.IO for stats service
-      statsService.setSocketIO(io);
-      
       // Initialize wallet socket
       const walletSocket = new WalletSocketClass(io);
       
@@ -216,11 +210,6 @@ async function startServer() {
         const betSocket = new BetSocketInitializer.default(io);
         betSocket.initialize();
       }
-
-      wagerMonitorSocket(io);
-
-      // Initialize stats service
-      initializeStatsService(io);
 
       // Start the server
       httpServer.listen(PORT, () => {

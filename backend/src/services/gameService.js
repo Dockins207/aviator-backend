@@ -6,11 +6,9 @@ import RedisRepository from '../redis-services/redisRepository.js';
 import GameSessionRepository from '../repositories/gameSessionRepository.js'; 
 import logger from '../config/logger.js';
 import betTrackingService from '../redis-services/betTrackingService.js'; 
-import statsService from './statsService.js';
 import cacheService from '../redis-services/cacheService.js';
 import notificationService from '../services/notificationService.js';
 import socketService from '../services/socketService.js';
-import gameReportingService from '../services/gameReportingService.js';
 import { EventEmitter } from 'events';
 
 // Custom error classes
@@ -50,7 +48,6 @@ class GameBoardService extends EventEmitter {
           errorMessage: error.message,
           errorStack: error.stack
         });
-        statsService.resetStatsOnGameCrash();
       });
       GameBoardService._gameCycleInitialized = true;
     }
@@ -82,7 +79,6 @@ class GameBoardService extends EventEmitter {
         errorStack: error.stack
       });
       this.gameLoopInitialized = false;
-      statsService.resetStatsOnGameCrash();
     }
   }
 
@@ -170,9 +166,6 @@ class GameBoardService extends EventEmitter {
             errorMessage: flyingError.message,
             errorStack: flyingError.stack
           });
-          
-          // Reset stats on game crash
-          statsService.resetStatsOnGameCrash();
         }
 
         // Crashed state pause
@@ -194,9 +187,6 @@ class GameBoardService extends EventEmitter {
       // Reset game state and loop active flag
       this.gameLoopActive = false;
       this.resetGameState();
-
-      // Reset stats on game crash
-      statsService.resetStatsOnGameCrash();
     }
   }
 
@@ -357,8 +347,6 @@ class GameBoardService extends EventEmitter {
     this.gameState.players.forEach(bet => {
       betTrackingService.finalizeBet(bet.betId, 'expired', crashMultiplier);
     });
-
-    statsService.resetStatsOnGameCrash();
 
     // Broadcast crash event with precise multiplier
     if (socketService) {
@@ -690,8 +678,7 @@ class GameBoardService extends EventEmitter {
         break;
       
       case 'completed':
-        // Final game cleanup and reporting
-        await gameReportingService.generateGameReport(gameId);
+        // Final game cleanup
         break;
     }
   }

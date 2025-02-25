@@ -114,4 +114,11 @@ export class PlayerBetRepository {
       throw new Error('Failed to activate bet');
     }
   }
+
+  static async findBetById(betId) {
+    const query = 'SELECT * FROM player_bets WHERE player_bet_id = $1';
+    const values = [betId];
+    const result = await pool.query(query, values);
+    return result.rows.length > 0 ? result.rows[0] : null;
+  }
 }
