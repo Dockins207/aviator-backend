@@ -1,9 +1,9 @@
 {
   "development": {
     "driver": "pg",
-    "host": "localhost",
+    "host": "${DB_HOST}",
     "port": 5432,
-    "database": "aviator_dev",
+    "database": "aviator_db",
     "user": "${DB_USER}",
     "password": "${DB_PASSWORD}",
     "schema": "public"

@@ -18,56 +18,54 @@ class RedisConnection {
 
   async connect() {
     try {
+      const redisOptions = {
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        password: process.env.REDIS_PASSWORD
+      };
+
       logger.info('REDIS_CONNECTION_ATTEMPT', {
-        url: process.env.REDIS_URL || 'redis://localhost:6379'
+        host: redisOptions.host,
+        port: redisOptions.port
       });
 
-      // Main client
       this.client = createClient({
-        url: process.env.REDIS_URL || 'redis://localhost:6379',
         socket: {
-          connectTimeout: 10000,  // 10 seconds
-          disconnectTimeout: 10000 // 10 seconds
+          host: redisOptions.host,
+          port: redisOptions.port,
+          connectTimeout: 15000,
+          disconnectTimeout: 15000
         },
-        retry_strategy: (options) => {
-          // Exponential backoff retry strategy
-          if (options.error && options.error.code === 'ECONNREFUSED') {
-            logger.error('REDIS_CONNECTION_REFUSED', {
-              attempt: options.attempt,
-              totalRetryTime: options.total_retry_time
-            });
-            return Math.min(options.attempt * 100, 3000);
-          }
-          return undefined;
-        }
+        password: redisOptions.password
       });
 
-      // Set up event listeners
-      this.client.on('connect', () => {
-        logger.info('REDIS_CONNECTED');
-      });
-
-      this.client.on('ready', () => {
-        logger.info('REDIS_READY');
-      });
-
-      this.client.on('error', (error) => {
-        logger.error('REDIS_ERROR', {
-          error: error.message,
-          stack: error.stack
+      // Comprehensive error handling
+      this.client.on('error', (err) => {
+        logger.error('REDIS_CLIENT_ERROR', {
+          errorMessage: err.message,
+          errorCode: err.code,
+          errorType: err.constructor.name,
+          errorStack: err.stack
         });
       });
 
-      this.client.on('end', () => {
-        logger.warn('REDIS_CONNECTION_ENDED');
+      this.client.on('connect', () => {
+        logger.info('REDIS_CONNECTION_SUCCESSFUL', {
+          host: redisOptions.host,
+          port: redisOptions.port
+        });
       });
 
-      this.client.on('reconnecting', () => {
-        logger.info('REDIS_RECONNECTING');
-      });
-
+      // Explicit connection and authentication
       await this.client.connect();
-      logger.info('REDIS_CONNECTION_SUCCESSFUL');
+      
+      // Additional authentication check
+      const authResult = await this.client.auth(redisOptions.password);
+      logger.info('REDIS_AUTHENTICATION_RESULT', { 
+        authenticated: authResult === 'OK' 
+      });
+
+      return this.client;
 
       // Pub client
       this.pubClient = this.client.duplicate();
@@ -88,16 +86,77 @@ class RedisConnection {
       this.resetMetrics();
     } catch (error) {
       logger.error('REDIS_CONNECTION_FAILED', {
-        error: error.message,
-        stack: error.stack
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorType: error.constructor.name,
+        errorStack: error.stack
       });
       throw error;
     }
   }
 
+  async testConnection() {
+    try {
+      const redisOptions = {
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        password: process.env.REDIS_PASSWORD
+      };
+
+      logger.info('REDIS_CONNECTION_TEST_STARTED', {
+        host: redisOptions.host,
+        port: redisOptions.port
+      });
+
+      const testClient = createClient({
+        socket: {
+          host: redisOptions.host,
+          port: redisOptions.port,
+          connectTimeout: 10000,
+          disconnectTimeout: 10000
+        },
+        password: redisOptions.password
+      });
+
+      testClient.on('error', (err) => {
+        logger.error('REDIS_TEST_CONNECTION_ERROR', {
+          errorMessage: err.message,
+          errorCode: err.code,
+          errorType: err.constructor.name
+        });
+      });
+
+      await testClient.connect();
+      await testClient.auth(redisOptions.password);
+
+      // Perform a simple Redis operation to verify full functionality
+      await testClient.set('connection_test_key', 'success');
+      const testValue = await testClient.get('connection_test_key');
+      
+      logger.info('REDIS_CONNECTION_TEST_SUCCESSFUL', {
+        testValue,
+        host: redisOptions.host,
+        port: redisOptions.port
+      });
+
+      await testClient.del('connection_test_key');
+      await testClient.quit();
+
+      return true;
+    } catch (error) {
+      logger.error('REDIS_CONNECTION_TEST_FAILED', {
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorType: error.constructor.name,
+        errorStack: error.stack
+      });
+      return false;
+    }
+  }
+
   getClient() {
     if (!this.client) {
-      throw new Error('Redis client not initialized');
+      throw new Error('Redis client not initialized. Call connect() first.');
     }
     return this.client;
   }

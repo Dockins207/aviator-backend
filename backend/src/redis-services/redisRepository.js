@@ -1,8 +1,8 @@
-import redisServer from '/home/kins/Desktop/aviator-backend/backend/redis-server.js';
+import redisServer from '../redis-server.js';
 import logger from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import WalletRepository from '../repositories/walletRepository.js';
-import pool from '../config/database.js';
+import { pool } from '../config/database.js';
 
 // Session Management Configuration
 const SESSION_MANAGEMENT_CONFIG = {

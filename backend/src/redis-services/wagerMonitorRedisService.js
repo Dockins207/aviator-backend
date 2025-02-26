@@ -3,11 +3,31 @@ import logger from '../config/logger.js';
 
 class WagerMonitorRedisService {
   constructor() {
-    // Redis connection configuration
+    // Redis connection configuration with robust error handling
     this.redis = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
+      host: process.env.REDIS_HOST || '127.0.0.1',
       port: process.env.REDIS_PORT || 6379,
-      db: process.env.REDIS_DB || 0
+      password: process.env.REDIS_PASSWORD || '2020', 
+      db: process.env.REDIS_DB || 0,
+      retryStrategy: (times) => {
+        const delay = Math.min(times * 50, 2000);
+        logger.warn('REDIS_CONNECTION_RETRY', {
+          service: 'wager-monitor',
+          attempts: times,
+          delay
+        });
+        return delay;
+      }
+    });
+
+    // Comprehensive error handling
+    this.redis.on('error', (error) => {
+      logger.error('WAGER_REDIS_ERROR', {
+        service: 'wager-monitor-redis',
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorType: error.name
+      });
     });
 
     // Wager-specific Redis key prefixes
@@ -17,11 +37,12 @@ class WagerMonitorRedisService {
       USER_WAGERS: 'aviator:user_wagers:'
     };
 
-    // Set up error handling
-    this.redis.on('error', (error) => {
-      logger.error('Redis Connection Error', {
+    // Set up connection event handling
+    this.redis.on('connect', () => {
+      logger.info('WAGER_REDIS_CONNECTED', {
         service: 'wager-monitor-redis',
-        errorMessage: error.message
+        host: this.redis.options.host,
+        port: this.redis.options.port
       });
     });
   }

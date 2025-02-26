@@ -240,7 +240,12 @@ const formatBalance = (balance, currency = 'KSH') => {
 
 export const authService = {
   async register(username, phoneNumber, password) {
+    const client = await pool.connect();
+
     try {
+      // Start a database transaction
+      await client.query('BEGIN');
+
       logger.info('User registration', {
         username: username,
         phoneNumber: phoneNumber.replace(/\d{4}/, '****')
@@ -326,7 +331,7 @@ export const authService = {
 
       // Check if user already exists
       const existingUserQuery = 'SELECT * FROM users WHERE phone_number = $1 OR username = $2';
-      const existingUserResult = await pool.query(existingUserQuery, [validationResult.normalizedNumber, username]);
+      const existingUserResult = await client.query(existingUserQuery, [validationResult.normalizedNumber, username]);
       
       if (existingUserResult.rows.length > 0) {
         logger.error('Registration failed', {
@@ -363,7 +368,7 @@ export const authService = {
       
       let result;
       try {
-        result = await pool.query(insertQuery, [
+        result = await client.query(insertQuery, [
           userId, 
           username, 
           validationResult.normalizedNumber, 
@@ -388,7 +393,20 @@ export const authService = {
       }
 
       // Create wallet for the new user using WalletRepository
-      await WalletRepository.createWallet(userId);
+      try {
+        await WalletRepository.createWallet(userId);
+      } catch (walletError) {
+        // Rollback the transaction if wallet creation fails
+        await client.query('ROLLBACK');
+        logger.error('WALLET_CREATION_FAILED', {
+          userId,
+          errorMessage: walletError.message
+        });
+        throw new Error('Failed to create user wallet');
+      }
+
+      // Commit the transaction
+      await client.query('COMMIT');
 
       logger.info('User registered and activated successfully', {
         username: username,
@@ -401,6 +419,9 @@ export const authService = {
         is_active: true  
       };
     } catch (error) {
+      // Ensure transaction is rolled back in case of any error
+      await client.query('ROLLBACK');
+
       logger.error('REGISTER_FATAL_ERROR', {
         errorCode: 'REGISTRATION_FAILED',
         errorMessage: error.message,
@@ -412,6 +433,9 @@ export const authService = {
         }
       });
       throw error;
+    } finally {
+      // Always release the client back to the pool
+      client.release();
     }
   },
 
@@ -560,8 +584,16 @@ export const authService = {
       delete user.password_hash;
 
       return { 
-        user, 
-        token 
+        success: true,
+        message: 'Login successful',
+        token, 
+        user: {
+          userId: user.user_id,
+          username: user.username,
+          phoneNumber: user.phone_number,
+          role: user.role || 'user',
+          isActive: user.is_active || false
+        }
       };
     } catch (error) {
       logger.error(`[${traceId}] Login error`, {

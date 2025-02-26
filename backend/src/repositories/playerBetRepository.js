@@ -1,4 +1,4 @@
-import pool from '../config/database.js';
+import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import GameRepository from './gameRepository.js';

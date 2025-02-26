@@ -44,16 +44,11 @@ CREATE TABLE IF NOT EXISTS game_sessions (
     game_type game_type NOT NULL,
     status game_status DEFAULT 'in_progress' NOT NULL,
     total_bet_amount NUMERIC(18, 2) DEFAULT 0.00 NOT NULL,
-    metadata JSONB DEFAULT '{}',
     
     -- Added columns from game sessions tracking
-    multiplier DECIMAL(10, 2) DEFAULT 1.00 NOT NULL,
-    crash_point DECIMAL(10, 2) DEFAULT 1.00 NOT NULL,
     crash_point_history JSONB DEFAULT '[]'::JSONB,
-    start_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    
 );
 
 -- Create indexes for performance
@@ -67,19 +62,11 @@ ALTER TABLE game_sessions
 ADD CONSTRAINT chk_total_bet_amount_non_negative 
 CHECK (total_bet_amount >= 0);
 
--- Optional: Add a trigger to automatically update the updated_at timestamp
-CREATE OR REPLACE FUNCTION update_modified_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+-- Remove the update_game_sessions_modtime trigger
+DROP TRIGGER IF EXISTS update_game_sessions_modtime ON game_sessions;
 
-CREATE TRIGGER update_game_sessions_modtime
-BEFORE UPDATE ON game_sessions
-FOR EACH ROW
-EXECUTE FUNCTION update_modified_column();
+-- Remove the update_modified_column function
+DROP FUNCTION IF EXISTS update_modified_column();
 
 -- Function to update game session metadata with admin privileges
 CREATE OR REPLACE FUNCTION update_game_session_metadata(
@@ -89,12 +76,23 @@ CREATE OR REPLACE FUNCTION update_game_session_metadata(
 BEGIN
     UPDATE game_sessions 
     SET 
-        metadata = metadata || p_metadata,
-        updated_at = CURRENT_TIMESTAMP
+        metadata = metadata || p_metadata
     WHERE game_session_id = p_game_session_id;
 END;
 $$ LANGUAGE plpgsql
 SET search_path = public, pg_temp;
+
+-- Function to mark game session as completed
+CREATE OR REPLACE FUNCTION mark_game_session_complete(
+    p_game_session_id UUID
+) RETURNS VOID AS $$
+BEGIN
+    UPDATE game_sessions 
+    SET status = 'completed'
+    WHERE game_session_id = p_game_session_id 
+      AND status = 'in_progress';
+END;
+$$ LANGUAGE plpgsql;
 
 -- Function to clean up old game records
 CREATE OR REPLACE FUNCTION cleanup_old_game_records()

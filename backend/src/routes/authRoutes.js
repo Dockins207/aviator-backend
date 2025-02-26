@@ -3,6 +3,8 @@ import { authService } from '../services/authService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import phoneValidator from '../utils/phoneValidator.js';
+import bcrypt from 'bcrypt';
+import { pool } from '../config/database.js';
 
 const router = express.Router();
 
@@ -111,177 +113,164 @@ router.post('/login', async (req, res) => {
 
 // Register route
 router.post('/register', async (req, res) => {
-  try {
-    // Comprehensive request logging
-    logger.info('REGISTRATION_REQUEST_RECEIVED', { 
-      timestamp: new Date().toISOString(),
-      requestBody: JSON.stringify(req.body),
-      requestHeaders: JSON.stringify(req.headers),
-      clientIp: req.ip
-    });
-
+  const registerUser = async (req, res) => {
     const { username, phoneNumber, password } = req.body;
+    const registrationTimestamp = new Date().toISOString();
+    const startTime = performance.now(); // Performance tracking
 
-    // Validate input presence
-    if (!username || !phoneNumber || !password) {
-      logger.error('REGISTRATION_MISSING_CREDENTIALS', {
-        missingFields: {
-          username: !username,
-          phoneNumber: !phoneNumber,
-          password: !password
-        }
+    // Set a timeout for the entire registration process
+    const registrationTimeout = setTimeout(() => {
+      logger.warn('REGISTRATION_TIMEOUT', {
+        username,
+        phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
+        elapsedTime: performance.now() - startTime
       });
-      return res.status(400).json({ 
+      res.status(504).json({
         status: 'error',
-        code: 'MISSING_CREDENTIALS',
-        message: 'Username, phone number, and password are required',
-        details: {
-          providedFields: Object.keys(req.body)
-        }
+        code: 'REGISTRATION_TIMEOUT',
+        message: 'Registration process took too long'
       });
-    }
-
-    // Validate phone number
-    const validationResult = phoneValidator.validate(phoneNumber);
-    if (!validationResult.isValid) {
-      logger.error('REGISTRATION_INVALID_PHONE_NUMBER', {
-        originalPhoneNumber: phoneNumber,
-        validationError: validationResult.error,
-        supportedFormats: validationResult.supportedFormats
-      });
-      return res.status(400).json({
-        status: 'error',
-        code: 'INVALID_PHONE_NUMBER',
-        message: validationResult.error,
-        details: {
-          supportedFormats: validationResult.supportedFormats
-        }
-      });
-    }
+    }, 9000); // 9 seconds to allow some buffer
 
     try {
-      const user = await authService.register(
-        username, 
-        validationResult.formattedNumber, 
-        password
-      );
-      
-      // Log successful registration
-      await logger.userActivity(
-        user.user_id, 
-        'registration',
-        req.ip,
-        {
-          userAgent: req.get('User-Agent'),
-          phoneNumber: validationResult.formattedNumber,
-          username: username
-        }
-      );
-
-      res.status(201).json(user);
-    } catch (registrationError) {
-      // Detailed error response for registration failures
-      logger.error('REGISTRATION_SERVICE_ERROR', {
-        errorMessage: registrationError.message,
-        errorStack: registrationError.stack,
-        requestData: {
-          username: username,
-          phoneNumber: validationResult.formattedNumber
-        }
+      // Enhanced logging for registration attempt
+      logger.info('USER_REGISTRATION_ATTEMPT', {
+        username,
+        phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
+        timestamp: registrationTimestamp
       });
 
-      // Categorize error responses
-      const errorResponses = {
-        'Username is required': {
-          status: 400,
-          code: 'USERNAME_REQUIRED',
-          message: 'Username is a required field'
-        },
-        'Username must be at least 3 characters long': {
-          status: 400,
-          code: 'USERNAME_TOO_SHORT',
-          message: 'Username must be at least 3 characters long'
-        },
-        'Username can only contain letters, numbers, and underscores': {
-          status: 400,
-          code: 'USERNAME_INVALID_CHARS',
-          message: 'Username can only contain letters, numbers, and underscores'
-        },
-        'Password is required': {
-          status: 400,
-          code: 'PASSWORD_REQUIRED',
-          message: 'Password is a required field'
-        },
-        'Password must be at least 8 characters long': {
-          status: 400,
-          code: 'PASSWORD_TOO_SHORT',
-          message: 'Password must be at least 8 characters long'
-        },
-        'Password must contain at least one uppercase letter': {
-          status: 400,
-          code: 'PASSWORD_NO_UPPERCASE',
-          message: 'Password must contain at least one uppercase letter'
-        },
-        'Password must contain at least one lowercase letter': {
-          status: 400,
-          code: 'PASSWORD_NO_LOWERCASE',
-          message: 'Password must contain at least one lowercase letter'
-        },
-        'Password must contain at least one number': {
-          status: 400,
-          code: 'PASSWORD_NO_NUMBER',
-          message: 'Password must contain at least one number'
-        },
-        'Password must contain at least one special character': {
-          status: 400,
-          code: 'PASSWORD_NO_SPECIAL_CHAR',
-          message: 'Password must contain at least one special character'
-        },
-        'User with this phone number or username already exists': {
-          status: 409,
-          code: 'USER_ALREADY_EXISTS',
-          message: 'A user with this phone number or username already exists'
-        },
-        'Failed to create user account': {
-          status: 500,
-          code: 'DATABASE_INSERT_FAILED',
-          message: 'An error occurred while creating your account. Please try again later.'
-        },
-        'Failed to initialize user wallet': {
-          status: 500,
-          code: 'WALLET_INIT_FAILED',
-          message: 'An error occurred while setting up your wallet. Please contact support.'
-        }
-      };
+      // Parallel database checks for efficiency
+      const [existingUserByUsername, existingUserByPhone] = await Promise.all([
+        pool.query('SELECT * FROM users WHERE username = $1', [username]),
+        pool.query('SELECT * FROM users WHERE phone_number = $1', [phoneNumber])
+      ]);
 
-      const errorResponse = errorResponses[registrationError.message] || {
-        status: 500,
-        code: 'REGISTRATION_FAILED',
-        message: 'Registration failed. Please try again later.'
-      };
+      if (existingUserByUsername.rows.length > 0) {
+        clearTimeout(registrationTimeout);
+        logger.warn('REGISTRATION_USERNAME_CONFLICT', {
+          username,
+          existingUserCount: existingUserByUsername.rows.length
+        });
+        return res.status(409).json({
+          status: 'error',
+          code: 'USERNAME_ALREADY_EXISTS',
+          message: 'Username is already registered'
+        });
+      }
 
-      res.status(errorResponse.status).json({
+      if (existingUserByPhone.rows.length > 0) {
+        clearTimeout(registrationTimeout);
+        logger.warn('REGISTRATION_PHONE_CONFLICT', {
+          phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
+          existingUserCount: existingUserByPhone.rows.length
+        });
+        return res.status(409).json({
+          status: 'error',
+          code: 'PHONE_NUMBER_ALREADY_EXISTS',
+          message: 'Phone number is already registered'
+        });
+      }
+
+      // Hash password with performance tracking
+      const passwordHashStart = performance.now();
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const passwordHashDuration = performance.now() - passwordHashStart;
+
+      // Begin transaction with timeout
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        // User insertion with performance tracking
+        const userInsertStart = performance.now();
+        const userInsertQuery = `
+          INSERT INTO users 
+          (username, phone_number, password_hash, salt, role, verification_status, is_active, created_at, updated_at) 
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+          RETURNING user_id
+        `;
+        const userResult = await client.query(userInsertQuery, [
+          username, 
+          phoneNumber, 
+          hashedPassword,
+          '', // salt 
+          'player', // default role
+          'unverified', // verification_status
+          true, // is_active
+          new Date(), // created_at
+          new Date() // updated_at
+        ]);
+        const userInsertDuration = performance.now() - userInsertStart;
+
+        const userId = userResult.rows[0].user_id;
+
+        // Commit transaction
+        await client.query('COMMIT');
+
+        // Clear timeout
+        clearTimeout(registrationTimeout);
+
+        const totalRegistrationTime = performance.now() - startTime;
+
+        logger.info('USER_REGISTRATION_PERFORMANCE', {
+          userId,
+          username,
+          totalTime: totalRegistrationTime,
+          passwordHashTime: passwordHashDuration,
+          userInsertTime: userInsertDuration
+        });
+
+        logger.info('USER_REGISTRATION_SUCCESS', {
+          userId,
+          username,
+          registrationTimestamp
+        });
+
+        res.status(201).json({
+          status: 'success',
+          message: 'User registered successfully',
+          userId,
+          registrationTime: totalRegistrationTime
+        });
+
+      } catch (dbError) {
+        // Rollback transaction
+        await client.query('ROLLBACK');
+        
+        clearTimeout(registrationTimeout);
+
+        logger.error('USER_REGISTRATION_DATABASE_ERROR', {
+          error: dbError.message,
+          stack: dbError.stack
+        });
+
+        res.status(500).json({
+          status: 'error',
+          code: 'DATABASE_ERROR',
+          message: 'Failed to complete registration'
+        });
+      } finally {
+        client.release();
+      }
+
+    } catch (error) {
+      clearTimeout(registrationTimeout);
+
+      logger.error('USER_REGISTRATION_UNEXPECTED_ERROR', {
+        error: error.message,
+        stack: error.stack
+      });
+
+      res.status(500).json({
         status: 'error',
-        code: errorResponse.code,
-        message: errorResponse.message,
-        details: {
-          originalErrorMessage: registrationError.message
-        }
+        code: 'UNEXPECTED_ERROR',
+        message: 'An unexpected error occurred during registration'
       });
     }
-  } catch (unexpectedError) {
-    logger.error('UNEXPECTED_REGISTRATION_ERROR', {
-      errorMessage: unexpectedError.message,
-      errorStack: unexpectedError.stack,
-      requestBody: JSON.stringify(req.body)
-    });
+  };
 
-    res.status(500).json({ 
-      status: 'error',
-      code: 'INTERNAL_SERVER_ERROR',
-      message: 'An unexpected error occurred during registration'
-    });
-  }
+  registerUser(req, res);
 });
 
 // Profile route (requires authentication)

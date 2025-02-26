@@ -5,13 +5,36 @@ class CacheService {
   constructor() {
     // Initialize Redis client for caching
     this.redisClient = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
+      host: process.env.REDIS_HOST || '127.0.0.1',
       port: process.env.REDIS_PORT || 6379,
-      db: process.env.REDIS_CACHE_DB || 1 // Separate DB for caching
+      password: process.env.REDIS_PASSWORD || '2020', // Add authentication
+      db: process.env.REDIS_CACHE_DB || 1, // Separate DB for caching
+      retryStrategy: (times) => {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+      }
+    });
+
+    // Error handling
+    this.redisClient.on('error', (error) => {
+      logger.error('CACHE_REDIS_ERROR', {
+        service: 'cache-service',
+        errorMessage: error.message,
+        errorType: error.name
+      });
+    });
+
+    this.redisClient.on('connect', () => {
+      logger.info('CACHE_REDIS_CONNECTED', {
+        service: 'cache-service',
+        host: this.redisClient.options.host,
+        port: this.redisClient.options.port
+      });
     });
 
     // Log cache service initialization
     logger.info('Cache Service Initialized', {
+      service: 'aviator-backend',
       host: this.redisClient.options.host,
       port: this.redisClient.options.port
     });

@@ -4,9 +4,37 @@ import schedule from 'node-schedule';
 
 class ChatRedisService {
   constructor() {
-    this.redis = new Redis(); // Assumes default Redis configuration
+    // Configure Redis with authentication
+    this.redis = new Redis({
+      host: process.env.REDIS_HOST || '127.0.0.1',
+      port: process.env.REDIS_PORT || 6379,
+      password: process.env.REDIS_PASSWORD || '2020',
+      db: process.env.REDIS_CHAT_DB || 2, // Separate DB for chat
+      retryStrategy: (times) => {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+      }
+    });
+    
     this.MAX_CACHED_MESSAGES = 100;
     this.CACHE_EXPIRATION_DAYS = 30; // Messages older than 30 days will be cleared
+    
+    // Error handling
+    this.redis.on('error', (error) => {
+      logger.error('CHAT_REDIS_ERROR', {
+        service: 'chat-service',
+        errorMessage: error.message,
+        errorType: error.name
+      });
+    });
+
+    this.redis.on('connect', () => {
+      logger.info('CHAT_REDIS_CONNECTED', {
+        service: 'chat-service',
+        host: this.redis.options.host,
+        port: this.redis.options.port
+      });
+    });
     
     // Schedule periodic cleanup
     this.scheduleDataCleanup();

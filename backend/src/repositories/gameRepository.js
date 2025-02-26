@@ -1,28 +1,20 @@
 import pkg from 'pg';
-const { Pool } = pkg;
-
-// Ensure global pool is created if it doesn't exist
-if (!global.pool) {
-  global.pool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-    database: process.env.DB_NAME || 'aviator_db',
-    user: process.env.DB_USER || 'admin',
-    password: process.env.DB_PASSWORD || '2020',
-    max: 20,  // Maximum number of clients in the pool
-    idleTimeoutMillis: 30000,  // How long a client is allowed to remain idle
-    connectionTimeoutMillis: 2000  // How long to wait when acquiring a client
-  });
-}
-
 import crypto from 'crypto';
 import logger from '../config/logger.js';
 import { GameSession } from '../models/GameSession.js';
 import { PlayerBet } from '../models/PlayerBet.js';
+import { pool as dbPool } from '../config/database.js';
+
+const { Pool } = pkg;
 
 class GameRepository {
   constructor(customPool = null) {
-    this.pool = customPool || global.pool;
+    this.pool = customPool || dbPool;
+    
+    logger.info('GAME_REPOSITORY_INITIALIZED', {
+      service: 'aviator-backend',
+      usingCustomPool: !!customPool
+    });
   }
 
   /**
@@ -101,7 +93,7 @@ class GameRepository {
         FROM game_sessions 
         WHERE game_session_id = $1
       `;
-      const result = await global.pool.query(query, [gameSessionId]);
+      const result = await dbPool.query(query, [gameSessionId]);
 
       if (result.rows.length === 0) {
         return false;  // Session not found, assume it's okay
@@ -145,7 +137,7 @@ class GameRepository {
           created_at < CURRENT_TIMESTAMP - INTERVAL '${this.MAX_SESSION_DURATION_MINUTES} minutes'
         RETURNING game_session_id
       `;
-      const result = await global.pool.query(query);
+      const result = await dbPool.query(query);
 
       logger.info('EXPIRED_SESSIONS_CLOSED', {
         closedSessionCount: result.rows.length
@@ -173,7 +165,7 @@ class GameRepository {
           ended_at < CURRENT_TIMESTAMP - INTERVAL '${this.CLEANUP_INTERVAL_MINUTES} minutes'
         RETURNING game_session_id
       `;
-      const result = await global.pool.query(query);
+      const result = await dbPool.query(query);
 
       logger.info('OLD_SESSIONS_CLEANED', {
         cleanedSessionCount: result.rows.length
@@ -311,7 +303,7 @@ class GameRepository {
         gameSessionId
       ];
 
-      const result = await global.pool.query(query, values);
+      const result = await dbPool.query(query, values);
 
       logger.info('GAME_RECORD_CREATED', {
         userId,
@@ -452,7 +444,7 @@ class GameRepository {
     `;
 
     try {
-      const result = await global.pool.query(query, [userId, limit, offset]);
+      const result = await dbPool.query(query, [userId, limit, offset]);
       
       logger.info('Retrieved user game history', { 
         userId, 
@@ -483,7 +475,7 @@ class GameRepository {
         LIMIT 1
       `;
       
-      const result = await global.pool.query(query, [gameType]);
+      const result = await dbPool.query(query, [gameType]);
       
       return result.rows.length > 0 ? result.rows[0] : null;
     } catch (error) {
@@ -514,7 +506,7 @@ class GameRepository {
         ) RETURNING game_session_id, game_type, status, created_at
       `;
 
-      const result = await global.pool.query(query, [gameType, status]);
+      const result = await dbPool.query(query, [gameType, status]);
 
       logger.info('GAME_SESSION_CREATED', {
         gameSessionId: result.rows[0].game_session_id,
@@ -551,7 +543,7 @@ class GameRepository {
       ) RETURNING game_session_id, game_type, status, created_at
     `;
 
-    const result = await global.pool.query(query, [gameType, 'in_progress']);
+    const result = await dbPool.query(query, [gameType, 'in_progress']);
 
     logger.info('GAME_SESSION_CREATED', {
       gameSessionId: result.rows[0].game_session_id,
@@ -601,7 +593,7 @@ class GameRepository {
         LIMIT 1
       `;
 
-      const result = await global.pool.query(query, [userId]);
+      const result = await dbPool.query(query, [userId]);
 
       logger.info('ACTIVE_BET_SEARCH_DETAILS', {
         userId,
@@ -634,7 +626,7 @@ class GameRepository {
           LIMIT 5
         `;
 
-        const recentBetsResult = await global.pool.query(recentBetsQuery, [userId]);
+        const recentBetsResult = await dbPool.query(recentBetsQuery, [userId]);
 
         logger.info('RECENT_BETS_CONTEXT', {
           userId,
@@ -673,7 +665,7 @@ class GameRepository {
           AND pb.status = 'active' 
           AND gs.status = 'in_progress'
       `;
-      const result = await global.pool.query(query, [userId]);
+      const result = await dbPool.query(query, [userId]);
 
       logger.info('ACTIVE_BETS_RETRIEVED', {
         userId,
@@ -780,7 +772,7 @@ class GameRepository {
           pb.player_bet_id = $1
       `;
 
-      const result = await global.pool.query(query, [betId]);
+      const result = await dbPool.query(query, [betId]);
 
       if (result.rows.length === 0) {
         logger.warn('PLAYER_BET_NOT_FOUND', {
@@ -814,7 +806,7 @@ class GameRepository {
         FROM information_schema.columns 
         WHERE table_name = 'game_sessions'
       `;
-      const schemaResult = await global.pool.query(schemaQuery);
+      const schemaResult = await dbPool.query(schemaQuery);
       const columns = schemaResult.rows.map(row => row.column_name);
 
       // Log the discovered columns for debugging
@@ -833,7 +825,7 @@ class GameRepository {
       `;
 
       // Execute the query
-      const result = await global.pool.query(query, [gameSessionId]);
+      const result = await dbPool.query(query, [gameSessionId]);
 
       if (result.rows.length === 0) {
         logger.warn('GAME_SESSION_NOT_FOUND', {
@@ -879,7 +871,7 @@ class GameRepository {
         WHERE user_id = $1 AND game_session_id = $2
       `;
 
-      const result = await global.pool.query(query, [userId, gameSessionId]);
+      const result = await dbPool.query(query, [userId, gameSessionId]);
       return result.rows.length > 0 ? result.rows[0] : null;
     } catch (error) {
       logger.error('ERROR_FINDING_BET', {
@@ -1019,7 +1011,7 @@ class GameRepository {
         playerBetId
       ];
 
-      const result = await global.pool.query(query, queryParams);
+      const result = await dbPool.query(query, queryParams);
 
       if (result.rows.length === 0) {
         logger.warn('PLAYER_BET_UPDATE_FAILED', {
@@ -1072,6 +1064,208 @@ class GameRepository {
         betDetails
       });
       throw new Error('Failed to store bet');
+    }
+  }
+
+  async updatePlayerBet(playerBetId, updateData) {
+    try {
+      // Validate required fields
+      if (!playerBetId) {
+        throw new Error('Player bet ID is required');
+      }
+
+      // Build the SET clause dynamically based on provided fields
+      const updateFields = [];
+      const queryParams = [];
+      let paramIndex = 1;
+
+      // Add each field to the update
+      if (updateData.status !== undefined) {
+        updateFields.push(`status = $${paramIndex++}`);
+        queryParams.push(updateData.status);
+      }
+
+      if (updateData.cashoutMultiplier !== undefined) {
+        updateFields.push(`cashout_multiplier = $${paramIndex++}`);
+        queryParams.push(updateData.cashoutMultiplier);
+      }
+
+      if (updateData.winAmount !== undefined) {
+        updateFields.push(`win_amount = $${paramIndex++}`);
+        queryParams.push(updateData.winAmount);
+      }
+
+      if (updateData.updatedAt !== undefined) {
+        updateFields.push(`updated_at = $${paramIndex++}`);
+        queryParams.push(updateData.updatedAt);
+      } else {
+        updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+      }
+
+      // If no fields to update, return early
+      if (updateFields.length === 0) {
+        logger.warn('NO_FIELDS_TO_UPDATE', {
+          playerBetId,
+          providedFields: Object.keys(updateData)
+        });
+        return null;
+      }
+
+      // Construct the query
+      const query = `
+        UPDATE player_bets
+        SET ${updateFields.join(', ')}
+        WHERE player_bet_id = $${paramIndex}
+        RETURNING *
+      `;
+
+      // Add the playerBetId as the last parameter
+      queryParams.push(playerBetId);
+
+      const result = await dbPool.query(query, queryParams);
+
+      if (result.rows.length === 0) {
+        logger.warn('PLAYER_BET_UPDATE_FAILED', {
+          playerBetId,
+          reason: 'Bet not found'
+        });
+        return null;
+      }
+
+      logger.info('PLAYER_BET_UPDATED', {
+        playerBetId,
+        updatedFields: Object.keys(updateData),
+        newStatus: updateData.status
+      });
+
+      return result.rows[0];
+    } catch (error) {
+      logger.error('ERROR_UPDATING_PLAYER_BET', {
+        playerBetId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async createPlayerBet(betData) {
+    try {
+      const {
+        userId,
+        gameSessionId,
+        amount,
+        currency = 'USD',
+        betType = 'standard',
+        status = 'active'
+      } = betData;
+
+      // Validate required fields
+      if (!userId || !gameSessionId || !amount) {
+        throw new Error('User ID, game session ID, and amount are required');
+      }
+
+      // Generate a unique bet ID
+      const playerBetId = crypto.randomUUID();
+
+      const query = `
+        INSERT INTO player_bets (
+          player_bet_id,
+          user_id,
+          game_session_id,
+          amount,
+          currency,
+          bet_type,
+          status,
+          created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+        RETURNING *
+      `;
+
+      const values = [
+        playerBetId,
+        userId,
+        gameSessionId,
+        amount,
+        currency,
+        betType,
+        status
+      ];
+
+      const result = await dbPool.query(query, values);
+
+      logger.info('PLAYER_BET_CREATED', {
+        playerBetId,
+        userId,
+        gameSessionId,
+        amount,
+        currency,
+        betType,
+        status
+      });
+
+      return result.rows[0];
+    } catch (error) {
+      logger.error('ERROR_CREATING_PLAYER_BET', {
+        userId: betData?.userId,
+        gameSessionId: betData?.gameSessionId,
+        amount: betData?.amount,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  async endGameSession(gameSessionId, endData = {}) {
+    try {
+      if (!gameSessionId) {
+        throw new Error('Game session ID is required');
+      }
+
+      const {
+        status = 'completed',
+        finalMultiplier = null,
+        endedAt = new Date()
+      } = endData;
+
+      const query = `
+        UPDATE game_sessions
+        SET 
+          status = $1,
+          final_multiplier = $2,
+          ended_at = $3,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE game_session_id = $4
+        RETURNING *
+      `;
+
+      const values = [status, finalMultiplier, endedAt, gameSessionId];
+
+      const result = await dbPool.query(query, values);
+
+      if (result.rows.length === 0) {
+        logger.warn('GAME_SESSION_END_FAILED', {
+          gameSessionId,
+          reason: 'Session not found'
+        });
+        return null;
+      }
+
+      logger.info('GAME_SESSION_ENDED', {
+        gameSessionId,
+        status,
+        finalMultiplier
+      });
+
+      return result.rows[0];
+    } catch (error) {
+      logger.error('ERROR_ENDING_GAME_SESSION', {
+        gameSessionId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
     }
   }
 }

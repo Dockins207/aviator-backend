@@ -21,21 +21,38 @@ export const authMiddleware = {
     let token;
     try {
       const authHeader = req.headers['authorization'];
+      const allHeaders = JSON.stringify(req.headers);
+      
+      // Enhanced logging for all headers and authorization details
+      logger.debug('FULL_REQUEST_HEADERS', {
+        timestamp: new Date().toISOString(),
+        allHeaders,
+        authHeaderPresent: !!authHeader
+      });
+
       token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
-      // Log token details
+      // Log token details with more context
       logger.debug('TOKEN_DETAILS', {
         timestamp: new Date().toISOString(),
         hasAuthHeader: !!authHeader,
-        token: token ? token.substring(0, 10) + '...' : null
+        authHeaderValue: authHeader,
+        tokenExtracted: token ? token.substring(0, 10) + '...' : null
       });
 
       if (!token) {
         logger.error('NO_TOKEN_PROVIDED', {
           timestamp: new Date().toISOString(),
-          headers: req.headers
+          headers: allHeaders,
+          authHeaderValue: authHeader
         });
-        return res.status(401).json({ message: 'No token provided' });
+        return res.status(401).json({ 
+          message: 'No token provided', 
+          details: {
+            authHeader: authHeader,
+            headersReceived: Object.keys(req.headers)
+          }
+        });
       }
 
       // Check if token is blacklisted

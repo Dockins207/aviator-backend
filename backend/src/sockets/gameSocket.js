@@ -4,6 +4,7 @@ import betService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authService } from '../services/authService.js';
 import jwt from 'jsonwebtoken';
+import { EventEmitter } from 'events';
 
 class GameSocket {
   constructor(io) {
@@ -18,8 +19,10 @@ class GameSocket {
     this.hasLoggedNoActiveBetsError = false;
     // Flag to track if active bets have been logged in this game cycle
     this.hasLoggedActiveBetsSummary = false;
+    this._lastBroadcastState = null;
 
     this.initializeSocket();
+    this.setupGameStateListeners();
   }
 
   initializeSocket() {
@@ -107,6 +110,53 @@ class GameSocket {
     }, 100);
   }
 
+  setupGameStateListeners() {
+    try {
+      gameService.on('stateChange', (stateUpdate) => {
+        this.broadcastGameState(stateUpdate);
+      });
+    } catch (error) {
+      logger.error('GAME_STATE_LISTENER_SETUP_ERROR', {
+        error: error.message
+      });
+    }
+  }
+
+  broadcastGameState(stateUpdate) {
+    try {
+      const formattedState = this.formatGameState(stateUpdate);
+      // Broadcast to all connected clients
+      this.io.emit('gameStateUpdate', formattedState);
+    } catch (error) {
+      logger.error('GAME_STATE_BROADCAST_ERROR', {
+        gameId: stateUpdate?.gameId,
+        error: error.message
+      });
+    }
+  }
+
+  formatGameState(state) {
+    try {
+      return {
+        gameId: state.gameId,
+        status: state.status,
+        multiplier: parseFloat(state.multiplier || 1.00).toFixed(2),
+        timestamp: Date.now(),
+        ...(state.countdown && { countdown: state.countdown }),
+        ...(state.status === 'crashed' && {
+          crashPoint: parseFloat(state.crashPoint).toFixed(2),
+          finalMultiplier: parseFloat(state.multiplier).toFixed(2)
+        })
+      };
+    } catch (error) {
+      logger.error('STATE_FORMAT_ERROR', {
+        state: JSON.stringify(state),
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
   async broadcastBettingPhase(gameState) {
     try {
       this.io.emit('gameStateUpdate', {
@@ -144,31 +194,27 @@ class GameSocket {
         const userId = socket.user?.user_id;
         if (!userId) continue;
 
-        // Check if user has active bets
-        const userActiveBets = gameState.activeBets.filter(bet => bet.userId === userId);
+        // Check if user has active bets, handle case where activeBets might be undefined
+        const userActiveBets = gameState.activeBets ? gameState.activeBets.filter(bet => bet.userId === userId) : [];
         const hasActiveBets = userActiveBets.length > 0;
 
         // Send personalized game state update to each user
         socket.emit('gameStateUpdate', {
           status: 'flying',
           gameId: gameState.gameId || null,
-          multiplier: gameState.multiplier ? gameState.multiplier.toFixed(2) : '1.00',
-          countdown: 0,  
-          crashPoint: gameState.crashPoint ? gameState.crashPoint.toFixed(2) : '1.00',
+          multiplier: Number(gameState.multiplier).toFixed(2), // Ensure consistent number formatting
+          timestamp: Date.now(),
           players: playerCount,
           buttonState: {
             placeBet: false,   
-            cashOut: hasActiveBets,  // Enable cashout only if user has active bets
+            cashOut: hasActiveBets,
             nextAction: hasActiveBets ? 'cashout' : null
-          },
-          flyingPhaseDetails: {
-            startTime: gameState.startTime || Date.now(),
-            elapsedTime: Date.now() - (gameState.startTime || Date.now())
           }
         });
       }
     } catch (error) {
       logger.error('Error in broadcastFlyingPhase', {
+        gameId: gameState?.gameId,
         errorMessage: error.message,
         errorStack: error.stack
       });

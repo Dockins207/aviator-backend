@@ -1,7 +1,6 @@
 import winston from 'winston';
 import 'winston-daily-rotate-file';
 import path from 'path';
-import { pool } from './database.js';
 
 // Log tracking to prevent duplicate logs
 const _logTracker = {

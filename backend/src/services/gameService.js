@@ -147,14 +147,6 @@ class GameBoardService extends EventEmitter {
           activeBets: []
         };
 
-        // Log initial game state
-        logger.info('GAME_STATE_INITIALIZED', {
-          service: 'aviator-backend',
-          gameId: this.gameState.gameId,
-          status: this.gameState.status,
-          timestamp: new Date().toISOString()
-        });
-
         // Betting phase
         await this.runBettingPhase();
 
@@ -279,40 +271,48 @@ class GameBoardService extends EventEmitter {
 
   // Start flying phase with multiplier progression
   async runFlyingPhase() {
-    // Set flying state
-    this.gameState.status = 'flying';
-    this.gameState.startTime = Date.now();
+    try {
+      // Set initial state
+      this.gameState.status = 'flying';
+      this.gameState.startTime = Date.now();
+      this.gameState.multiplier = 1.00;
+      this.gameState.lastUpdateTime = Date.now();
 
-    // Emit state change for bet service to handle button states
-    this.emit('stateChange', this.gameState);
-
-    // Get active bets count for the current game session
-    const activeBets = await RedisRepository.getBetsBySessionKey(this.gameState.gameId);
-    this.gameState.activeBets = activeBets || [];
-
-    // Start multiplier calculation
-    return new Promise((resolve, reject) => {
-      this.multiplierInterval = setInterval(() => {
-        // Calculate multiplier
-        const elapsedTime = Date.now() - this.gameState.startTime;
-        
-        // Use simulateMultiplierProgression instead of non-existent calculateMultiplier
-        this.gameState.multiplier = gameUtils.simulateMultiplierProgression(
-          this.gameState.multiplier, 
-          this.gameState.crashPoint
-        );
-
-        // Check for crash
-        if (this.gameState.multiplier >= this.gameState.crashPoint) {
-          clearInterval(this.multiplierInterval);
+      // Start multiplier calculation
+      return new Promise((resolve) => {
+        this.multiplierInterval = setInterval(() => {
+          const currentTime = Date.now();
+          const timeDiff = currentTime - this.gameState.lastUpdateTime;
           
-          // Finalize bets that haven't been cashed out
-          this.handleGameCrash();
-          
-          resolve();
-        }
-      }, 100);
-    });
+          // Calculate smooth multiplier increment based on time difference
+          const increment = (timeDiff / 1000) * 0.1; // 0.1 per second
+          this.gameState.multiplier = parseFloat((this.gameState.multiplier + increment).toFixed(2));
+          this.gameState.lastUpdateTime = currentTime;
+
+          // Emit state change with current multiplier
+          this.emit('stateChange', {
+            gameId: this.gameState.gameId,
+            status: 'flying',
+            multiplier: this.gameState.multiplier,
+            timestamp: currentTime
+          });
+
+          // Check for crash
+          if (this.gameState.multiplier >= this.gameState.crashPoint) {
+            clearInterval(this.multiplierInterval);
+            this.handleGameCrash();
+            resolve();
+          }
+        }, 50); // Update more frequently for smoother animation
+      });
+    } catch (error) {
+      logger.error('Error during flying phase', {
+        gameId: this.gameState.gameId,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
   }
 
   async runCrashedPhase() {
@@ -386,19 +386,6 @@ class GameBoardService extends EventEmitter {
         timestamp: new Date().toISOString()
       });
       throw new GameStateError('Game state is undefined');
-    }
-
-    // Only log when the game state actually changes
-    if (!this._lastStateValue || this._lastStateValue !== this.gameState.status) {
-      logger.debug('GAME_STATE_CHANGED', {
-        service: 'aviator-backend',
-        previousState: this._lastStateValue || 'none',
-        newState: this.gameState.status,
-        gameId: this.gameState.gameId,
-        timestamp: new Date().toISOString()
-      });
-
-      this._lastStateValue = this.gameState.status;
     }
 
     const gameState = {
@@ -602,14 +589,6 @@ class GameBoardService extends EventEmitter {
       // Update cache with new state
       await cacheService.set(cacheCacheKey, updatedState, 3600); // 1-hour cache
 
-      // Log state update
-      this.logger.info('Game State Updated', {
-        gameId,
-        previousStatus: currentState.status,
-        newStatus: updatedState.status,
-        updates
-      });
-
       // Trigger any necessary side effects based on state change
       await this.handleStateChangeSideEffects(gameId, currentState, updatedState);
 
@@ -736,6 +715,26 @@ class GameBoardService extends EventEmitter {
         stack: error.stack
       });
       throw error;
+    }
+  }
+
+  // Update game state and notify listeners
+  updateGameState(newState) {
+    try {
+      // Update the state
+      this.gameState = {
+        ...this.gameState,
+        ...newState
+      };
+
+      // Emit state change event
+      this.emit('stateChange', this.gameState);
+
+    } catch (error) {
+      logger.error('Error updating game state', {
+        gameId: this.gameState?.gameId,
+        error: error.message
+      });
     }
   }
 }

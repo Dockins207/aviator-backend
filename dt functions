@@ -1,0 +1,122 @@
+Renamed function to activate_pending_bets_with_redis
+Modified to return a table of active bet details
+Returns key information for Redis caching:
+bet_id
+user_id
+bet_amount
+autocashout_multiplier
+This function allows the backend to:
+
+Activate pending bets in the database
+Retrieve active bet details
+Push these details to Redis for real-time cashout tracking
+Typical usage in backend code would look like:
+
+javascript
+CopyInsert
+// Pseudo-code
+async function startGameSession(gameSessionId) {
+    // Activate bets in database and get active bet details
+    const activeBets = await db.query('SELECT * FROM activate_pending_bets_with_redis($1)', [gameSessionId]);
+    
+    // Push each active bet to Redis
+    activeBets.forEach(bet => {
+        redisClient.set(`active_bet:${bet.bet_id}`, JSON.stringify({
+            userId: bet.user_id,
+            betAmount: bet.betAmount,
+            autoCashoutMultiplier: bet.autoCashoutMultiplier
+        }));
+    });
+}
+Would you like me to ela
+
+
+
+
+I'll explain the functions I've created:
+
+place_bet() Function:
+Creates a new bet with 'pending' status
+Generates a unique bet ID
+Allows optional autocashout multiplier
+Returns the bet ID for tracking
+activate_pending_bets() Function:
+Activates all pending bets for a specific game session
+Transitions bets from 'pending' to 'active' state
+Returns the number of bets activated
+resolve_game_session_bets() Function:
+Resolves bets at the end of a game session
+Determines bet outcomes based on:
+Cashout multiplier
+Final crash point
+Updates bet status to 'won' or 'lost'
+Calculates payout amounts
+Returns summary of bet results (total won/lost bets, total winnings)
+Example usage:
+
+sql
+CopyInsert
+-- Place a bet
+SELECT place_bet(
+    user_id := '123e4567-e89b-12d3-a456-426614174000', 
+    game_session_id := '223e4567-e89b-12d3-a456-426614174000', 
+    bet_amount := 100.00, 
+    autocashout_multiplier := 2.5
+);
+
+-- Activate pending bets when game starts
+SELECT activate_pending_bets('223e4567-e89b-12d3-a456-426614174000');
+
+-- Resolve bets at game end
+SELECT * FROM resolve_game_session_bets(
+    p_game_session_id := '223e4567-e89b-12d3-a456-426614174000', 
+    p_final_crash_point := 1.5
+);
+Key features:
+
+Handles bet lifecycle from placement to resolution
+Supports automatic and manual cashout scenarios
+Provides detailed tracking and reporting
+Ensures consistent bet status management
+
+
+
+
+
+The new function update_bet_status() provides:
+
+Validation of bet status transitions
+Automatic payout calculation for won bets
+Prevents invalid state changes
+Raises informative exceptions
+Allowed transitions:
+
+pending → active
+active → won
+active → lost
+Usage example:
+
+sql
+CopyInsert
+-- Activate a pending bet
+SELECT update_bet_status('bet-uuid-here', 'active');
+
+-- Mark an active bet as won
+SELECT update_bet_status('bet-uuid-here', 'won');
+Would you like me to apply this migration and explain the function in more detail?
+
+
+
+
+
+
+I've added a function mark_game_session_complete that:
+
+Takes a game_session_id as input
+Updates the status to 'completed'
+Only updates if the current status is 'in_progress'
+This function can be called from your application code when you want to mark a game session as completed. For example:
+
+sql
+CopyInsert
+SELECT mark_game_session_complete('some-uuid-here');

@@ -1,5 +1,5 @@
 import logger from '../config/logger.js';
-import pool from '../config/database.js';
+import { pool } from '../config/database.js';
 import { Wallet } from '../models/Wallet.js';
 import WalletSocket from '../sockets/walletSocket.js';
 import crypto from 'crypto';

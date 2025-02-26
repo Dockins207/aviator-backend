@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import { default as cors } from 'cors';
+import cors from 'cors';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import os from 'os';
@@ -25,22 +25,66 @@ import socketManager from './sockets/socketManager.js';
 dotenv.config();
 
 // Explicitly set environment variables
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 8001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000' || 'http://192.168.0.11:3000';
+
+// Improved CORS configuration
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://192.168.0.11:3000', 
+  'https://localhost:3000',
+  'http://127.0.0.1:3000',
+  'https://avbetting.netlify.app'
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const isAllowed = ALLOWED_ORIGINS.includes(origin);
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With', 
+    'Accept', 
+    'Origin', 
+    'Cache-Control',
+    'Pragma'  
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
 
 // Create Express app
 const app = express();
 
-// Completely open CORS configuration for development
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+// Apply CORS middleware
+app.use(cors(corsOptions));
 
 // Middleware
 app.use(express.json());
+
+// Add error handling middleware before routes
+app.use((err, req, res, next) => {
+  console.error('Unhandled Error:', err);
+  res.status(500).json({
+    status: 'error',
+    message: 'Internal Server Error',
+    details: process.env.NODE_ENV === 'development' ? err.message : {}
+  });
+});
+
 app.use(errorMiddleware);
 
 // Network interface logging
@@ -124,42 +168,7 @@ async function startServer() {
     // Configure Socket.IO with CORS
     const socketOptions = {
       cors: {
-        origin: function(origin, callback) {
-          const ALLOWED_ORIGINS = [
-            'http://localhost:3000', 
-            'http://localhost:8000',
-            'https://aviator.game', 
-            'https://www.aviator.game',
-            'http://192.168.0.11:3000',
-            'http://192.168.0.12:3000',
-            'http://192.168.0.12:8000',
-            'https://avbetting.netlify.app'
-          ];
-
-          // If no origin (like in server-to-server communication), allow
-          if (!origin) {
-            callback(null, true);
-            return;
-          }
-
-          // Check if origin is in allowed list or matches local network pattern
-          if (ALLOWED_ORIGINS.includes(origin) || 
-              /^http:\/\/192\.168\.0\.\d+:\d+$/.test(origin)) {
-            callback(null, true);
-          } else {
-            logger.warn('SOCKET_CORS_ORIGIN_REJECTED', {
-              origin,
-              allowedOrigins: ALLOWED_ORIGINS
-            });
-
-            // Allow all origins during development if not in production
-            if (process.env.NODE_ENV !== 'production') {
-              callback(null, true);
-            } else {
-              callback(new Error('Not allowed by CORS'));
-            }
-          }
-        },
+        origin: ALLOWED_ORIGINS,
         methods: ['GET', 'POST'],
         allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token'],
         credentials: true
@@ -235,6 +244,63 @@ async function startServer() {
       process.exit(1);
     });
 
+    // Comprehensive Health Check Route
+    app.get('/api/health', (req, res) => {
+      try {
+        // Capture request details for logging
+        const requestDetails = {
+          timestamp: new Date().toISOString(),
+          method: req.method,
+          headers: req.headers,
+          gameId: req.headers['x-game-id'] || 'not-provided'
+        };
+
+        console.log('🩺 Health Check Request:', JSON.stringify(requestDetails, null, 2));
+
+        const healthStatus = {
+          status: 'healthy',
+          timestamp: new Date().toISOString(),
+          uptime: process.uptime(),
+          environment: process.env.NODE_ENV || 'development',
+          server: {
+            name: 'Aviator Backend',
+            version: process.env.npm_package_version || '1.0.0',
+            nodeVersion: process.version
+          },
+          system: {
+            platform: process.platform,
+            architecture: process.arch
+          },
+          memory: {
+            total: process.memoryUsage().heapTotal,
+            used: process.memoryUsage().heapUsed,
+            free: process.memoryUsage().heapTotal - process.memoryUsage().heapUsed
+          },
+          connections: {
+            database: true,  // Add actual database connection check
+            redis: true,     // Add actual Redis connection check
+            socketIO: true   // Check socket.io connectivity if applicable
+          },
+          requestMetadata: {
+            gameId: requestDetails.gameId
+          }
+        };
+
+        res.status(200).json(healthStatus);
+      } catch (error) {
+        console.error('🚨 Health Check Error:', {
+          message: error.message,
+          stack: error.stack
+        });
+
+        res.status(500).json({
+          status: 'error',
+          message: 'Health check failed',
+          details: process.env.NODE_ENV === 'development' ? error.message : 'Internal Server Error'
+        });
+      }
+    });
+
     // Basic routes
     app.use('/api/auth', authRoutes);
     app.use('/api/game', gameRoutes);
@@ -283,6 +349,13 @@ async function startServer() {
     process.exit(1);
   }
 }
+
+// Register routes
+app.use('/auth', authRoutes);
+app.use('/game', gameRoutes);
+app.use('/wallet', walletRoutes);
+app.use('/bet', betRoutes);
+app.use('/payment', paymentRoutes);
 
 // Global error handling
 process.on('uncaughtException', (error) => {

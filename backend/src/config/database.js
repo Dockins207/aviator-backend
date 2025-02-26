@@ -1,9 +1,11 @@
 import pkg from 'pg';
+import logger from './logger.js';
+
 const { Pool } = pkg;
 
-// Create a new pool using the connection string
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
+// Configuration object for PostgreSQL pool
+const poolConfig = {
+  host: process.env.DB_HOST || '192.168.75.118',
   port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
   database: process.env.DB_NAME || 'aviator_db',
   user: process.env.DB_USER || 'admin',
@@ -13,17 +15,44 @@ const pool = new Pool({
   max: 20, // maximum number of clients in the pool
   min: 4, // minimum number of clients to keep in the pool
   idleTimeoutMillis: 30000, // how long a client is allowed to remain idle before being closed
-  connectionTimeoutMillis: 5000, // increased from 2000 to 5000 for more robust connection
+  connectionTimeoutMillis: 15000, // increased from 5000 to 15000 for more robust connection
   
   // Persistence and reliability settings
   application_name: 'AviatorBackend', // helps in monitoring
   keepAlive: true, // maintain connection even when idle
   ssl: false, // explicitly disable SSL if not required
+};
+
+// Log configuration before creating pool (using console.log initially)
+console.log('Initializing PostgreSQL pool with configuration:', {
+  host: poolConfig.host,
+  port: poolConfig.port,
+  database: poolConfig.database,
+  user: poolConfig.user,
+  connectionTimeoutMillis: poolConfig.connectionTimeoutMillis,
+  max: poolConfig.max,
+  min: poolConfig.min
 });
 
-// Error handler for pool errors
+// Create pool instance
+const pool = new Pool(poolConfig);
+
+// Now that pool is created, we can use logger for subsequent operations
 pool.on('error', (err) => {
-  console.error('Unexpected database pool error:', err.message);
+  logger.error('POSTGRES_POOL_ERROR', {
+    errorMessage: err.message,
+    errorCode: err.code,
+    errorStack: err.stack
+  });
+});
+
+pool.on('connect', (client) => {
+  logger.info('POSTGRES_CLIENT_CONNECTED', {
+    host: client.connectionParameters.host,
+    port: client.connectionParameters.port,
+    database: client.connectionParameters.database,
+    user: client.connectionParameters.user
+  });
 });
 
 // Prevent multiple connection logs
@@ -43,9 +72,10 @@ async function connectWithRetry(maxRetries = 5) {
         await client.query('SELECT NOW()');
         
         if (!_hasLoggedDatabaseConnection) {
-          console.log('Database connection established', {
-            host: process.env.DB_HOST || 'localhost',
-            database: process.env.DB_NAME || 'aviator_db',
+          logger.info('POSTGRES_CONNECTION_ESTABLISHED', {
+            host: poolConfig.host,
+            database: poolConfig.database,
+            user: poolConfig.user,
             attempt
           });
           _hasLoggedDatabaseConnection = true;
@@ -54,14 +84,26 @@ async function connectWithRetry(maxRetries = 5) {
         client.release();
         return true;
       } catch (queryError) {
+        logger.error('POSTGRES_QUERY_ERROR', {
+          errorMessage: queryError.message,
+          errorCode: queryError.code,
+          errorStack: queryError.stack
+        });
         client.release();
         throw queryError;
       }
     } catch (error) {
       lastError = error;
-      console.error('Database connection attempt failed:', {
+      logger.error('POSTGRES_CONNECTION_ATTEMPT_FAILED', {
         attempt,
-        error: error.message
+        maxRetries,
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorStack: error.stack,
+        host: poolConfig.host,
+        port: poolConfig.port,
+        database: poolConfig.database,
+        user: poolConfig.user
       });
       
       if (attempt < maxRetries) {
@@ -73,9 +115,10 @@ async function connectWithRetry(maxRetries = 5) {
     }
   }
 
-  console.error('Database connection failed after all retries', {
+  logger.error('POSTGRES_CONNECTION_FAILED_AFTER_RETRIES', {
     maxRetries,
-    lastError: lastError?.message
+    lastErrorMessage: lastError?.message,
+    lastErrorCode: lastError?.code
   });
   return false;
 }
@@ -94,23 +137,18 @@ const connectionHealthCheck = setInterval(async () => {
     await client.query('SELECT NOW()');
     client.release();
   } catch (error) {
-    console.error('Database health check failed:', error.message);
+    logger.error('POSTGRES_HEALTH_CHECK_FAILED', {
+      errorMessage: error.message,
+      errorCode: error.code
+    });
     _hasLoggedDatabaseConnection = false;
   }
 }, 60000); // Check every minute
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Closing database connection pool', {
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 5432,
-    database: process.env.DB_NAME || 'aviator_db',
-    user: process.env.DB_USER || 'admin',
-  });
+// Clean up on process exit
+process.on('exit', () => {
   clearInterval(connectionHealthCheck);
-  await pool.end();
-  process.exit(0);
+  pool.end();
 });
 
 export { pool, connectWithRetry };
-export default pool;

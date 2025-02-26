@@ -2,15 +2,15 @@ import { Sequelize, Op } from 'sequelize';
 import crypto from 'crypto';
 import ChatMessage from '../models/ChatMessage.js';
 import logger from '../config/logger.js';
-import pool from '../config/database.js';
+import { pool } from '../config/database.js';
 import chatRedisService from '../redis-services/chatRedisService.js';
 
 // Ensure a default group chat exists
 async function ensureDefaultGroupChat() {
   try {
     // Find a system user to use as sender_id for the default group chat
-    const userQuery = 'SELECT user_id FROM users LIMIT 1';
-    const userResult = await pool.query(userQuery);
+    const userQuery = 'SELECT user_id FROM users WHERE role = $1 LIMIT 1';
+    const userResult = await pool.query(userQuery, ['admin']);
     
     if (userResult.rows.length === 0) {
       logger.error('NO_SYSTEM_USER_FOUND', { message: 'Cannot create default group chat without a system user' });
