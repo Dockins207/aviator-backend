@@ -127,118 +127,6 @@ class BetTrackingService extends EventEmitter {
   }
 
   /**
-   * Activate a placed bet, moving it to active state
-   * @param {string} betId - Unique bet identifier
-   * @param {string} gameSessionId - Game session identifier
-   * @returns {Object} Activated bet details
-   */
-  async activateBet(betId, gameSessionId) {
-    try {
-      // Validate game session ID
-      if (!gameSessionId) {
-        throw new Error('INVALID_GAME_SESSION_ID');
-      }
-
-      // Log activation attempt
-      logger.info('BET_ACTIVATION_ATTEMPT', {
-        betId,
-        gameSessionId,
-        timestamp: new Date().toISOString()
-      });
-
-      // First verify bet exists and validate state
-      const existingBet = await this.redisRepository.getBetById(gameSessionId, betId);
-      if (!existingBet) {
-        const error = new Error('BET_NOT_FOUND');
-        logger.error('BET_NOT_FOUND_DURING_ACTIVATION', {
-          betId,
-          gameSessionId,
-          errorMessage: error.message
-        });
-        throw error;
-      }
-
-      // Pre-activation validation
-      if (existingBet.status !== this.BET_STATES.PLACED) {
-        const error = new Error('INVALID_BET_STATE_FOR_ACTIVATION');
-        logger.error('INVALID_BET_STATE_FOR_ACTIVATION', {
-          betId,
-          gameSessionId,
-          currentState: existingBet.status,
-          expectedState: this.BET_STATES.PLACED
-        });
-        throw error;
-      }
-
-      // Validate bet amount and user details
-      if (!existingBet.amount || !existingBet.userId) {
-        const error = new Error('INVALID_BET_DETAILS');
-        logger.error('INVALID_BET_DETAILS', {
-          betId,
-          gameSessionId,
-          amount: existingBet.amount,
-          userId: existingBet.userId
-        });
-        throw error;
-      }
-
-      // Attempt to transition bet to active state
-      let activatedBet;
-      try {
-        activatedBet = await this.transitionBetState(
-          betId,
-          gameSessionId,
-          this.BET_STATES.ACTIVE
-        );
-      } catch (transitionError) {
-        // Attempt recovery if transition fails
-        logger.warn('BET_ACTIVATION_TRANSITION_FAILED', {
-          betId,
-          gameSessionId,
-          error: transitionError.message
-        });
-
-        // Verify bet state again
-        const currentBet = await this.redisRepository.getBetById(gameSessionId, betId);
-        if (currentBet && currentBet.status === this.BET_STATES.ACTIVE) {
-          // Bet was actually activated despite the error
-          logger.info('BET_ALREADY_ACTIVATED', {
-            betId,
-            gameSessionId
-          });
-          activatedBet = currentBet;
-        } else {
-          // Rethrow if recovery failed
-          throw transitionError;
-        }
-      }
-
-      // Log successful activation
-      logger.info('BET_ACTIVATED', {
-        betId,
-        userId: activatedBet.userId,
-        amount: activatedBet.amount,
-        gameSessionId,
-        timestamp: new Date().toISOString()
-      });
-
-      return activatedBet;
-    } catch (error) {
-      // Log activation failure with detailed context
-      logger.error('BET_ACTIVATION_FAILED', {
-        betId,
-        gameSessionId,
-        errorType: error.constructor.name,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        timestamp: new Date().toISOString(),
-        context: 'activateBet'
-      });
-      throw error;
-    }
-  }
-
-  /**
    * Mark bet as cashed out with comprehensive validation
    * @param {string} betId - Unique bet identifier
    * @param {string} gameSessionId - Current game session identifier
@@ -332,7 +220,6 @@ class BetTrackingService extends EventEmitter {
         cashoutDetails
       );
 
-      // Log successful cashout
       logger.info('BET_CASHED_OUT', {
         betId,
         userId: betDetails.userId,
@@ -567,172 +454,6 @@ class BetTrackingService extends EventEmitter {
   }
 
   /**
-   * Activate queued bets for the current game session with ABSOLUTE STRICT validation
-   * @returns {Object} Comprehensive activation summary
-   * @throws {Error} For any deviation from strict activation requirements
-   */
-  activateQueuedBets() {
-    // MANDATORY Game State Validation
-    if (this.currentGameState !== this.GAME_STATES.FLYING) {
-      logger.error('CRITICAL_BET_ACTIVATION_STATE_VIOLATION', {
-        currentGameState: this.currentGameState,
-        expectedState: this.GAME_STATES.FLYING,
-        context: 'activateQueuedBets'
-      });
-      throw new Error('SECURITY_VIOLATION_INVALID_GAME_STATE_FOR_ACTIVATION');
-    }
-
-    // MANDATORY Session ID Validation
-    if (!this.currentGameSessionId) {
-      logger.error('CRITICAL_SESSION_VIOLATION', {
-        context: 'activateQueuedBets',
-        details: 'No active game session for bet activation',
-        timestamp: new Date().toISOString()
-      });
-      throw new Error('SECURITY_VIOLATION_NO_ACTIVE_SESSION');
-    }
-
-    // Retrieve bets with STRICT filtering
-    const queuedBets = this.redisRepository.getBetsBySessionNumber(
-      this.currentGameSessionNumber
-    );
-
-    // ABSOLUTE Validation of Queued Bets
-    if (!queuedBets || queuedBets.length === 0) {
-      logger.warn('NO_QUEUED_BETS_FOR_ACTIVATION', {
-        gameSessionNumber: this.currentGameSessionNumber,
-        context: 'activateQueuedBets'
-      });
-      return {
-        totalBets: 0,
-        successCount: 0,
-        failedCount: 0,
-        processingTime: 0
-      };
-    }
-
-    // Performance and Security Tracking
-    const activationStartTime = Date.now();
-    const activationResults = {
-      totalBets: queuedBets.length,
-      successCount: 0,
-      failedCount: 0,
-      failedBetIds: []
-    };
-
-    // ATOMIC Bet Activation with Comprehensive Error Handling
-    const activatedBets = queuedBets.map(bet => {
-      try {
-        // STRICT Bet Validation Before Activation
-        if (!bet.id || !bet.userId || !bet.amount) {
-          throw new Error('INVALID_BET_STRUCTURE');
-        }
-
-        const activatedBet = this.transitionBetState(
-          bet.id, 
-          bet.sessionId, 
-          this.BET_STATES.ACTIVE
-        );
-
-        activationResults.successCount++;
-        return activatedBet;
-      } catch (activationError) {
-        logger.error('BET_ACTIVATION_FAILURE', {
-          betId: bet.id,
-          errorMessage: activationError.message,
-          context: 'activateQueuedBets'
-        });
-
-        activationResults.failedCount++;
-        activationResults.failedBetIds.push(bet.id);
-        return null;
-      }
-    }).filter(Boolean);
-
-    // Calculate Processing Time
-    const processingTime = Date.now() - activationStartTime;
-
-    // COMPREHENSIVE Activation Summary Logging
-    logger.info('BULK_BET_ACTIVATION_SUMMARY', {
-      service: 'aviator-backend',
-      totalBets: activationResults.totalBets,
-      successCount: activationResults.successCount,
-      failedCount: activationResults.failedCount,
-      processingTime: processingTime,
-      failedBetIds: activationResults.failedBetIds
-    });
-
-    // Throw error if NO bets were successfully activated
-    if (activationResults.successCount === 0) {
-      throw new Error('CRITICAL_BET_ACTIVATION_COMPLETE_FAILURE');
-    }
-
-    return {
-      totalBets: activationResults.totalBets,
-      successCount: activationResults.successCount,
-      failedCount: activationResults.failedCount,
-      processingTime: processingTime,
-      activatedBets
-    };
-  }
-
-  /**
-   * Bulk activate all placed bets for the current game session
-   * @param {string} gameSessionId - Current game session identifier
-   * @returns {Array} List of activated bets
-   */
-  bulkActivatePlacedBets(gameSessionId) {
-    // Retrieve all placed bets for the current game session
-    const allBets = this.redisRepository.getBetsForSession(
-      gameSessionId, 
-      this.BET_STATES.PLACED
-    );
-    
-    // Filter only placed bets
-    const placedBets = allBets.filter(
-      bet => bet.status === this.BET_STATES.PLACED
-    );
-
-    // Bulk activate placed bets
-    const activatedBets = placedBets.map(bet => {
-      try {
-        // Transition bet to active state
-        const activatedBet = this.transitionBetState(
-          bet.id, 
-          gameSessionId, 
-          this.BET_STATES.ACTIVE
-        );
-
-        // Log successful activation
-        logger.info('BET_ACTIVATED', {
-          betId: bet.id,
-          userId: bet.userId,
-          amount: bet.amount
-        });
-
-        return activatedBet;
-      } catch (error) {
-        // Log activation failures
-        logger.error('BET_ACTIVATION_FAILED', {
-          betId: bet.id,
-          errorMessage: error.message
-        });
-
-        return null;
-      }
-    }).filter(Boolean); // Remove any null entries from failed activations
-
-    // Log bulk activation summary
-    logger.info('BULK_BET_ACTIVATION_SUMMARY', {
-      totalPlacedBets: placedBets.length,
-      activatedBets: activatedBets.length,
-      gameSessionId
-    });
-
-    return activatedBets;
-  }
-
-  /**
    * Validate the provided session ID against the current game session
    * @param {string} providedSessionId - Session ID to validate
    * @returns {boolean} Whether the session ID is valid
@@ -761,335 +482,6 @@ class BetTrackingService extends EventEmitter {
       });
       throw new Error('Failed to validate game session ID');
     }
-  }
-
-  /**
-   * Activate bets for a given game state with strict session ID validation
-   * @param {Object} gameState - Current game state
-   * @param {Array} [providedBets=null] - Optional bets to activate
-   * @param {string} [providedSessionId=null] - Session ID from bet service
-   * @returns {Object} Activation result with activated and failed bets
-   * @throws {Error} For session ID validation or activation failures
-   */
-  async activateBets(gameState, providedBets = null, providedSessionId = null) {
-    try {
-      // Validate game state
-      if (!gameState || !gameState.gameId) {
-        throw new Error('INVALID_GAME_STATE');
-      }
-
-      // Validate session ID if provided
-      if (providedSessionId && providedSessionId !== gameState.gameId) {
-        throw new Error('SESSION_ID_MISMATCH');
-      }
-
-      const gameId = gameState.gameId;
-      
-      // Get both placed and queued bets
-      const [placedBets, queuedBets] = await Promise.all([
-        this.redisRepository.getPlacedBets(gameId),
-        this.redisRepository.getQueuedBets(gameId)
-      ]);
-
-      // Combine all bets to activate
-      const betsToActivate = [
-        ...placedBets,
-        ...queuedBets,
-        ...(providedBets || [])
-      ].filter(bet => bet !== null);
-
-      if (!betsToActivate.length) {
-        logger.info('NO_BETS_TO_ACTIVATE', {
-          gameId,
-          placedCount: placedBets.length,
-          queuedCount: queuedBets.length,
-          providedCount: providedBets?.length || 0
-        });
-        return {
-          activatedBets: [],
-          failedBets: []
-        };
-      }
-
-      // Process bets in batches for better performance
-      const batchSize = 50;
-      const results = {
-        activatedBets: [],
-        failedBets: []
-      };
-
-      // Process bets in batches
-      for (let i = 0; i < betsToActivate.length; i += batchSize) {
-        const batch = betsToActivate.slice(i, i + batchSize);
-        const batchPromises = batch.map(async (bet) => {
-          try {
-            // Transition bet to active state
-            const activatedBet = await this.activateBet(bet.id, gameId);
-            return { success: true, bet: activatedBet };
-          } catch (error) {
-            logger.error('BET_ACTIVATION_FAILED', {
-              betId: bet.id,
-              gameId,
-              userId: bet.userId,
-              error: error.message
-            });
-            return { 
-              success: false, 
-              bet,
-              error: error.message 
-            };
-          }
-        });
-
-        const batchResults = await Promise.all(batchPromises);
-
-        // Separate successful and failed activations
-        batchResults.forEach(result => {
-          if (result.success) {
-            results.activatedBets.push(result.bet);
-          } else {
-            results.failedBets.push({
-              betId: result.bet.id,
-              userId: result.bet.userId,
-              error: result.error
-            });
-          }
-        });
-      }
-
-      // Log activation results
-      logger.info('BETS_ACTIVATION_COMPLETED', {
-        gameId,
-        totalBets: betsToActivate.length,
-        activatedCount: results.activatedBets.length,
-        failedCount: results.failedBets.length,
-        timestamp: new Date().toISOString()
-      });
-
-      return results;
-    } catch (error) {
-      logger.error('BETS_ACTIVATION_ERROR', {
-        gameId: gameState?.gameId,
-        error: error.message,
-        stack: error.stack
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Fallback method to activate bets individually if bulk fails
-   * @param {Object} gameState - Current game state
-   * @returns {Object} Fallback activation results
-   */
-  async fallbackActivateBets(gameState) {
-    try {
-      // Validate game state
-      if (!gameState || !gameState.gameId) {
-        throw new Error('Invalid game state for bet activation');
-      }
-
-      // Determine the game session ID with priority
-      const gameSessionId = gameState.gameId;
-      
-      // Retrieve all placed bets for the current game session
-      const allBets = await this.redisRepository.getBetsForSession(
-        gameSessionId, 
-        this.BET_STATES.PLACED
-      );
-      
-      // Filter only placed bets
-      const placedBets = allBets.filter(
-        bet => bet.status === this.BET_STATES.PLACED
-      );
-
-      const activationResults = {
-        totalPlacedBets: placedBets.length,
-        successCount: 0,
-        failedCount: 0,
-        failedBetIds: []
-      };
-
-      // Activate bets one by one
-      for (const bet of placedBets) {
-        try {
-          // Transition bet to active state
-          const activatedBet = this.transitionBetState(
-            bet.id, 
-            gameSessionId, 
-            this.BET_STATES.ACTIVE
-          );
-
-          activationResults.successCount++;
-          activationResults.activatedBets.push({
-            betId: bet.id,
-            userId: bet.userId,
-            gameSessionId,
-            details: activatedBet
-          });
-        } catch (activationError) {
-          // Log and track failed bet activations
-          logger.error('INDIVIDUAL_BET_ACTIVATION_FAILED', {
-            betId: bet.id,
-            gameSessionId,
-            errorMessage: activationError.message
-          });
-
-          activationResults.failedCount++;
-          activationResults.failedBetIds.push(bet.id);
-        }
-      }
-
-      // Log fallback activation summary
-      logger.info('FALLBACK_BET_ACTIVATION_SUMMARY', {
-        gameSessionId,
-        totalPlacedBets: placedBets.length,
-        activatedBetsCount: activationResults.successCount,
-        failedBetsCount: activationResults.failedCount
-      });
-
-      return {
-        success: activationResults.failedCount === 0,
-        gameSessionId,
-        activatedBets: activationResults.activatedBets,
-        failedBetIds: activationResults.failedBetIds
-      };
-    } catch (error) {
-      // Comprehensive error handling
-      logger.error('FALLBACK_BET_ACTIVATION_ERROR', {
-        gameId: gameState?.gameId,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-
-      return {
-        success: false,
-        error: true,
-        gameSessionId: gameState?.gameId,
-        errorMessage: error.message
-      };
-    }
-  }
-
-  /**
-   * Recover placed bets during unexpected failures
-   * @param {string} gameSessionId - Current game session ID
-   * @returns {Array} Recovered bets
-   */
-  async recoverPlacedBets(gameSessionId) {
-    try {
-      // Attempt to recover bets from multiple potential sources
-      const recoveryStrategies = [
-        () => this.redisRepository.getPlacedBetsByGameSession(gameSessionId),
-        () => this.redisRepository.getNextSessionBets(),
-        () => this.redisRepository.getOrphanedBets()
-      ];
-
-      for (const strategy of recoveryStrategies) {
-        try {
-          const recoveredBets = await strategy();
-          
-          if (recoveredBets && recoveredBets.length > 0) {
-            logger.info('Bets recovered successfully', {
-              recoveryStrategy: strategy.name,
-              recoveredBetsCount: recoveredBets.length
-            });
-            return recoveredBets;
-          }
-        } catch (strategyError) {
-          logger.warn('Bet recovery strategy failed', {
-            strategy: strategy.name,
-            errorMessage: strategyError.message
-          });
-        }
-      }
-
-      // If no bets recovered
-      logger.warn('No bets could be recovered', { gameSessionId });
-      return [];
-    } catch (error) {
-      logger.error('Catastrophic bet recovery failure', {
-        errorMessage: error.message,
-        gameSessionId
-      });
-      return [];
-    }
-  }
-
-  /**
-   * Initialize or set game session ID with STRICT validation
-   * @param {string} [externalGameSessionId] - Optional external game session ID
-   * @returns {string} Current game session ID
-   */
-  async initializeGameSessionId(externalGameSessionId = null) {
-    const gameService = await this.getGameService();
-    const currentGameServiceSessionId = gameService.gameState.gameId;
-
-    // STRICT VALIDATION: Use ONLY gameService's game ID
-    if (!currentGameServiceSessionId) {
-      logger.error('GAME_SESSION_INITIALIZATION_FAILED', {
-        reason: 'No valid game session ID from gameService',
-        externalSessionId: externalGameSessionId
-      });
-      throw new Error('INVALID_GAME_SESSION_ID: Cannot initialize without gameService session');
-    }
-
-    // Ignore external session ID, use ONLY gameService's ID
-    this.currentGameSessionId = currentGameServiceSessionId;
-    
-    logger.info('GAME_SESSION_INITIALIZED', {
-      gameSessionId: this.currentGameSessionId
-    });
-
-    return this.currentGameSessionId;
-  }
-
-  /**
-   * Reset game session ID with STRICT validation
-   * @returns {string} New game session ID
-   */
-  async resetGameSessionId() {
-    const gameService = await this.getGameService();
-    const currentGameServiceSessionId = gameService.gameState.gameId;
-
-    // STRICT VALIDATION: Use ONLY gameService's game ID
-    if (!currentGameServiceSessionId) {
-      logger.error('GAME_SESSION_RESET_FAILED', {
-        reason: 'No valid game session ID from gameService'
-      });
-      throw new Error('INVALID_GAME_SESSION_ID: Cannot reset without gameService session');
-    }
-
-    this.currentGameSessionId = currentGameServiceSessionId;
-    
-    logger.info('GAME_SESSION_RESET', {
-      gameSessionId: this.currentGameSessionId
-    });
-
-    return this.currentGameSessionId;
-  }
-
-  /**
-   * Validate game session ID with ABSOLUTE STRICT checks
-   * @param {string} providedSessionId - Session ID to validate
-   * @returns {boolean} Whether the session ID is valid
-   * @throws {Error} If session validation fails
-   */
-  async validateGameSessionId(providedSessionId) {
-    const gameService = await this.getGameService();
-    const currentGameServiceSessionId = gameService.gameState.gameId;
-
-    // STRICT VALIDATION: Exact match required
-    if (!providedSessionId || providedSessionId !== currentGameServiceSessionId) {
-      logger.error('GAME_SESSION_VALIDATION_FAILED', {
-        providedSessionId,
-        currentGameServiceSessionId,
-        reason: 'Session ID does not match gameService'
-      });
-      throw new Error('INVALID_GAME_SESSION_ID: Provided session ID does not match current game session');
-    }
-
-    return true;
   }
 
   /**
@@ -1151,18 +543,6 @@ class BetTrackingService extends EventEmitter {
         currentGameState: this.currentGameState,
         currentGameSessionNumber: this.currentGameSessionNumber
       });
-
-      // Clear all bets in the current session
-      const activeBets = await this.getActiveBetsForSession(gameSessionId);
-      
-      // Mark all active bets as expired
-      for (const bet of activeBets) {
-        await this.expireBet(
-          bet.id, 
-          gameSessionId, 
-          'game_crashed'
-        );
-      }
 
       // Clear session data in Redis
       const clearResult = await this.redisRepository.clearGameSessionData(gameSessionId);
@@ -1337,223 +717,170 @@ class BetTrackingService extends EventEmitter {
   }
 
   /**
-   * Schedule autocashout for a specific bet
-   * @param {Object} params - Autocashout scheduling parameters
-   * @param {string} params.betId - Unique bet identifier
-   * @param {string} params.userId - User who placed the bet
-   * @param {string} params.gameSessionId - Current game session ID
-   * @param {number} params.cashoutMultiplier - Multiplier to trigger cashout
-   * @returns {Promise<void>}
+   * Initialize or set game session ID with STRICT validation
+   * @param {string} [externalGameSessionId] - Optional external game session ID
+   * @returns {string} Current game session ID
    */
-  async scheduleAutoCashout({ betId, userId, gameSessionId, cashoutMultiplier }) {
-    try {
-      // Validate input parameters
-      if (!betId || !userId || !gameSessionId || !cashoutMultiplier) {
-        throw new Error('INVALID_AUTOCASHOUT_PARAMETERS');
-      }
+  async initializeGameSessionId(externalGameSessionId = null) {
+    const gameService = await this.getGameService();
+    const currentGameServiceSessionId = gameService.gameState.gameId;
 
-      // Ensure RedisRepository client is ready and retrieved
-      const redisClient = this.redisRepository.getClient();
-
-      // Create a unique key for idempotency check
-      const idempotencyKey = `aviator:autocashout:idempotency:${betId}`;
-      
-      // Check if this bet has already been scheduled for autocashout
-      const existingSchedule = await redisClient.get(idempotencyKey);
-      if (existingSchedule) {
-        logger.warn('AUTOCASHOUT_ALREADY_SCHEDULED', {
-          betId,
-          userId,
-          gameSessionId,
-          message: 'Skipping duplicate autocashout scheduling'
-        });
-        return;
-      }
-
-      // Store autocashout details in Redis
-      const autocashoutKey = `aviator:autocashout:${gameSessionId}:${betId}`;
-      await redisClient.set(autocashoutKey, JSON.stringify({
-        betId,
-        userId,
-        gameSessionId,
-        cashoutMultiplier,
-        scheduledAt: Date.now()
-      }), {
-        EX: 3600  // Expire after 1 hour
+    // STRICT VALIDATION: Use ONLY gameService's game ID
+    if (!currentGameServiceSessionId) {
+      logger.error('GAME_SESSION_INITIALIZATION_FAILED', {
+        reason: 'No valid game session ID from gameService',
+        externalSessionId: externalGameSessionId
       });
-
-      // Set idempotency flag to prevent duplicate scheduling
-      await redisClient.set(idempotencyKey, 'scheduled', {
-        EX: 3600  // Expire after 1 hour
-      });
-
-      // Log successful autocashout scheduling
-      logger.info('AUTOCASHOUT_SCHEDULED', {
-        betId,
-        userId,
-        gameSessionId,
-        cashoutMultiplier
-      });
-    } catch (error) {
-      // Log and rethrow error for upstream handling
-      logger.error('AUTOCASHOUT_SCHEDULING_ERROR', {
-        betId,
-        userId,
-        gameSessionId,
-        cashoutMultiplier,
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-      throw error;
+      throw new Error('INVALID_GAME_SESSION_ID: Cannot initialize without gameService session');
     }
+
+    // Ignore external session ID, use ONLY gameService's ID
+    this.currentGameSessionId = currentGameServiceSessionId;
+    
+    logger.info('GAME_SESSION_INITIALIZED', {
+      gameSessionId: this.currentGameSessionId
+    });
+
+    return this.currentGameSessionId;
   }
 
   /**
-   * Handle bet placement during non-betting game states
-   * @param {Object} betDetails - Details of the bet to queue
-   * @param {Object} cashoutStrategy - Cashout strategy for the bet
-   * @returns {Promise<Object>} Queued bet details
+   * Reset game session ID with STRICT validation
+   * @returns {string} New game session ID
    */
-  async handleBetInNonBettingState(betDetails, cashoutStrategy) {
-    try {
-      // Validate input parameters
-      if (!betDetails) {
-        throw new Error('INVALID_BET_DETAILS');
-      }
+  async resetGameSessionId() {
+    const gameService = await this.getGameService();
+    const currentGameServiceSessionId = gameService.gameState.gameId;
 
-      // Validate bet ID from BetService
-      if (!betDetails.id) {
-        logger.error('BET_ID_REQUIRED', {
-          message: 'Bet ID must be generated by BetService',
-          betDetails
-        });
-        throw new Error('BET_ID_MUST_BE_PROVIDED_BY_BETSERVICE');
-      }
-
-      // Validate current game state
-      if (this.currentGameState === this.GAME_STATES.BETTING) {
-        logger.warn('INVALID_BET_QUEUING_STATE', {
-          message: 'Bet cannot be queued during betting state',
-          betDetails
-        });
-        throw new Error('BET_PLACEMENT_NOT_ALLOWED_IN_BETTING_STATE');
-      } else if (this.currentGameState === this.GAME_STATES.FLYING || this.currentGameState === this.GAME_STATES.CRASHED) {
-        // Queue the bet for future processing
-        return await this.redisRepository.queueBetForNextSession({
-          ...betDetails,
-          status: this.BET_STATES.QUEUED
-        });
-      } else {
-        throw new Error('INVALID_GAME_STATE');
-      }
-    } catch (error) {
-      logger.error('BET_PLACEMENT_ERROR', { error });
-      throw error;
+    // STRICT VALIDATION: Use ONLY gameService's game ID
+    if (!currentGameServiceSessionId) {
+      logger.error('GAME_SESSION_RESET_FAILED', {
+        reason: 'No valid game session ID from gameService'
+      });
+      throw new Error('INVALID_GAME_SESSION_ID: Cannot reset without gameService session');
     }
+
+    this.currentGameSessionId = currentGameServiceSessionId;
+    
+    logger.info('GAME_SESSION_RESET', {
+      gameSessionId: this.currentGameSessionId
+    });
+
+    return this.currentGameSessionId;
   }
 
   /**
-   * Process queued bets for a new game session
-   * @param {string} newGameSessionId - ID of the new game session
-   * @returns {Promise<Object>} Processing results
+   * Validate game session ID with ABSOLUTE STRICT checks
+   * @param {string} providedSessionId - Session ID to validate
+   * @returns {boolean} Whether the session ID is valid
+   * @throws {Error} If session validation fails
    */
-  async processQueuedBets(newGameSessionId) {
+  async validateGameSessionId(providedSessionId) {
+    const gameService = await this.getGameService();
+    const currentGameServiceSessionId = gameService.gameState.gameId;
+
+    // STRICT VALIDATION: Exact match required
+    if (!providedSessionId || providedSessionId !== currentGameServiceSessionId) {
+      logger.error('GAME_SESSION_VALIDATION_FAILED', {
+        providedSessionId,
+        currentGameServiceSessionId,
+        reason: 'Session ID does not match gameService'
+      });
+      throw new Error('INVALID_GAME_SESSION_ID: Provided session ID does not match current game session');
+    }
+
+    return true;
+  }
+
+  async placeBet(betData) {
     try {
-      // Validate input
-      if (!newGameSessionId) {
-        throw new Error('INVALID_GAME_SESSION_ID');
-      }
+      const { userId, amount, gameId } = betData;
 
-      // Retrieve queued bets
-      const queuedBets = await this.redisRepository.getNextSessionBets();
+      // Generate unique bet ID
+      const betId = uuidv4();
 
-      const processingResults = {
-        totalQueuedBets: queuedBets.length,
-        processedBets: [],
-        failedBets: []
+      // Create bet record
+      const bet = {
+        id: betId,
+        userId,
+        amount,
+        gameId,
+        status: 'active',
+        createdAt: Date.now()
       };
 
-      // Process each queued bet
-      for (const queuedBet of queuedBets) {
-        try {
-          // Transfer bet to new session
-          const transferredBet = await this.transferQueuedBetsToNewSession(
-            queuedBet, 
-            newGameSessionId
-          );
-
-          processingResults.processedBets.push(transferredBet);
-        } catch (transferError) {
-          logger.warn('Failed to transfer queued bet', {
-            betId: queuedBet.id,
-            errorMessage: transferError.message
-          });
-          processingResults.failedBets.push(queuedBet);
-        }
-      }
-
-      // Clean up processed bets
-      if (processingResults.processedBets.length > 0) {
-        await this.redisRepository.removeProcessedQueuedBets(
-          processingResults.processedBets.map(bet => bet.id)
-        );
-      }
-
-      logger.info('Queued bets processing completed', processingResults);
-
-      return processingResults;
-    } catch (error) {
-      logger.error('Failed to process queued bets', {
-        errorMessage: error.message,
-        newGameSessionId
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Transfer queued bets to a new game session
-   * @param {Object} queuedBet - Bet to transfer
-   * @param {string} newGameSessionId - ID of the new game session
-   * @returns {Promise<Object>} Transferred bet details
-   */
-  async transferQueuedBetsToNewSession(queuedBet, newGameSessionId) {
-    try {
-      // Validate bet and new session
-      if (!queuedBet || !newGameSessionId) {
-        throw new Error('INVALID_TRANSFER_PARAMETERS');
-      }
-
-      // Prepare bet for new session
-      const transferredBet = {
-        ...queuedBet,
-        originalSessionId: queuedBet.gameSessionId, // Keep track of original session
-        gameSessionId: newGameSessionId, // Assign new session ID
-        transferredAt: new Date().toISOString(),
-        status: this.BET_STATES.PLACED,
-        queuedInState: queuedBet.queuedInState || 'unknown' // Preserve queued state info
-      };
-
-      // Store bet in new session
-      await this.redisRepository.storeBet(
-        newGameSessionId, 
-        transferredBet, 
-        this.BET_STATES.PLACED
+      // Store bet in Redis
+      await this.redisClient.hSet(
+        `bet:${betId}`,
+        bet
       );
 
-      logger.info('Queued bet transferred to new session', {
-        betId: transferredBet.id,
-        newGameSessionId
+      return {
+        success: true,
+        betId,
+        ...bet
+      };
+
+    } catch (error) {
+      logger.error('Error placing bet', {
+        error: error.message
+      });
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async getBetsByGameId(gameId) {
+    try {
+      const bets = await this.redisClient.hGetAll(`game:${gameId}:bets`);
+      return Object.values(bets).map(bet => JSON.parse(bet));
+    } catch (error) {
+      logger.error('Error getting bets by game ID', {
+        error: error.message
+      });
+      return [];
+    }
+  }
+
+  async cashoutBet(betId, multiplier) {
+    try {
+      const bet = await this.redisClient.hGetAll(`bet:${betId}`);
+      
+      if (!bet || bet.status !== 'active') {
+        return {
+          success: false,
+          error: 'Bet not found or not active'
+        };
+      }
+
+      // Calculate winnings
+      const winnings = parseFloat(bet.amount) * multiplier;
+
+      // Update bet status
+      await this.redisClient.hSet(`bet:${betId}`, {
+        status: 'cashed_out',
+        cashoutMultiplier: multiplier,
+        winnings,
+        cashedOutAt: Date.now()
       });
 
-      return transferredBet;
+      return {
+        success: true,
+        betId,
+        winnings,
+        multiplier
+      };
+
     } catch (error) {
-      logger.error('Failed to transfer queued bet', {
-        errorMessage: error.message,
-        queuedBet,
-        newGameSessionId
+      logger.error('Error cashing out bet', {
+        error: error.message
       });
-      throw error;
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 
@@ -1821,16 +1148,17 @@ class BetTrackingService extends EventEmitter {
       for (const queuedBet of queuedBets) {
         try {
           // Activate bet in the new session
-          const activatedBet = await this.activateBet(
-            queuedBet.betId, 
-            newGameSessionId
-          );
+          const activatedBet = await this.placeBet({
+            userId: queuedBet.userId,
+            amount: queuedBet.amount,
+            gameId: queuedBet.gameId
+          });
 
           processedBets.push(activatedBet);
-          processedBetIds.push(queuedBet.betId);
+          processedBetIds.push(queuedBet.id);
         } catch (betProcessingError) {
           logger.error('QUEUED_BET_PROCESSING_ERROR', {
-            betId: queuedBet.betId,
+            betId: queuedBet.id,
             errorMessage: betProcessingError.message
           });
           // Optionally, handle failed bet processing (e.g., requeue or notify)
@@ -1875,98 +1203,6 @@ class BetTrackingService extends EventEmitter {
     } catch (error) {
       logger.error('TRANSFER_QUEUED_BETS_ERROR', {
         errorMessage: error.message
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Update handleGameCrash to support bet queuing
-   * @param {Object} crashDetails - Details of the game crash
-   * @returns {Promise<Object>} Game crash handling result
-   */
-
-
-  async handleGameCrash(crashDetails = {}) {
-    try {
-      // Validate current game state
-      if (this.currentGameState !== this.GAME_STATES.FLYING) {
-        logger.warn('INVALID_CRASH_STATE', {
-          currentState: this.currentGameState,
-          expectedState: this.GAME_STATES.FLYING
-        });
-        return null;
-      }
-
-      // Update game state
-      this.currentGameState = this.GAME_STATES.CRASHED;
-
-      // Queue any active bets for next session
-      const activeBets = await this.redisRepository.getActiveBets(
-        this.currentGameSessionId
-      );
-
-      const queuedBetIds = [];
-      for (const bet of activeBets) {
-        try {
-          // Queue bet for next session
-          await this.redisRepository.queueBetForNextSession({
-            ...bet,
-            status: this.BET_STATES.LOST
-          });
-          queuedBetIds.push(bet.betId);
-        } catch (queueError) {
-          logger.error('FAILED_TO_QUEUE_BET_AFTER_CRASH', {
-            betId: bet.betId,
-            errorMessage: queueError.message
-          });
-        }
-      }
-
-      logger.info('GAME_CRASH_BET_QUEUING', {
-        queuedBetCount: queuedBetIds.length,
-        gameSessionId: this.currentGameSessionId
-      });
-
-      return {
-        queuedBetIds
-      };
-    } catch (error) {
-      logger.error('HANDLE_GAME_CRASH_WITH_QUEUING_ERROR', {
-        errorMessage: error.message,
-        crashDetails
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Modify scheduleAutoCashout to handle queued bets
-   * @param {Object} betDetails - Bet details
-   * @param {number} autoCashoutMultiplier - Multiplier for auto cashout
-   * @returns {Promise<Object>} Scheduled cashout result
-   */
-  async scheduleAutoCashout(betDetails, autoCashoutMultiplier) {
-    try {
-      // Check if bet is in a non-betting state
-      if (this.currentGameState !== this.GAME_STATES.BETTING) {
-        // Queue cashout for next session
-        return await this.redisRepository.queueBetForNextSession({
-          ...betDetails,
-          status: this.BET_STATES.QUEUED
-        });
-      }
-
-      // Existing auto cashout logic
-      return await this.originalScheduleAutoCashout(
-        betDetails, 
-        autoCashoutMultiplier
-      );
-    } catch (error) {
-      logger.error('SCHEDULE_AUTO_CASHOUT_WITH_QUEUING_ERROR', {
-        errorMessage: error.message,
-        betDetails,
-        autoCashoutMultiplier
       });
       throw error;
     }

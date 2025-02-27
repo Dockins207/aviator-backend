@@ -21,6 +21,11 @@ function Apply-Migration($file) {
     $fullPath = Join-Path -Path $PSScriptRoot -ChildPath "migrations\$file"
     Write-Host "Applying migration: $file"
     
+    # Drop tables if they exist to avoid conflicts
+    $tableName = $file -replace '^\d+_create_(.+)_table\.sql$', '$1'
+    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "DROP TABLE IF EXISTS $tableName CASCADE;"
+    
+    # Apply migration
     psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f $fullPath
     
     if ($LASTEXITCODE -ne 0) {

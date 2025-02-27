@@ -163,26 +163,24 @@ async function startServer() {
     });
 
     // Create HTTP server
-    const httpServer = createServer(app);
+    const server = createServer(app);
 
-    // Configure Socket.IO with CORS
-    const socketOptions = {
+    // Initialize Socket.IO with CORS
+    const io = new SocketIOServer(server, {
       cors: {
         origin: ALLOWED_ORIGINS,
-        methods: ['GET', 'POST'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token'],
-        credentials: true
+        methods: ["GET", "POST"],
+        credentials: true,
+        allowedHeaders: ["Content-Type", "Authorization"]
       },
-      pingTimeout: 60000, // Increased timeout
-      pingInterval: 25000, // Increased interval
-      maxHttpBufferSize: 1e6, // 1 MB max payload
+      pingTimeout: 60000,
+      pingInterval: 25000,
+      maxHttpBufferSize: 1e6,
       connectionStateRecovery: {
-        maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+        maxDisconnectionDuration: 2 * 60 * 1000,
         skipMiddlewares: true
       }
-    };
-
-    const io = new SocketIOServer(httpServer, socketOptions);
+    });
 
     // Initialize socket manager
     socketManager.initialize(io);
@@ -221,7 +219,7 @@ async function startServer() {
       }
 
       // Start the server
-      httpServer.listen(PORT, () => {
+      server.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
         console.log(`Environment: ${NODE_ENV}`);
         
@@ -334,7 +332,7 @@ async function startServer() {
     process.on('SIGINT', async () => {
       try {
         await redisConnection.disconnect();
-        httpServer.close(() => {
+        server.close(() => {
           logger.info('Server and Redis connection closed');
           process.exit(0);
         });

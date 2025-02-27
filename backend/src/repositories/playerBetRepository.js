@@ -1,81 +1,66 @@
 import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
-import { v4 as uuidv4 } from 'uuid';
 import GameRepository from './gameRepository.js';
 
-export class PlayerBetRepository {
+export default class PlayerBetRepository {
   // Create a bet record in the database
   static async placeBet({
-    betId = uuidv4(), 
     userId, 
-    amount, 
-    gameSessionId, 
-    cashoutMultiplier, 
-    autocashout = false 
+    betAmount, 
+    gameSessionId = null, 
+    cashoutMultiplier = null, 
+    autocashoutMultiplier = null,
+    status = 'pending',
+    payoutAmount = null,
+    betType = 'standard'
   }) {
     try {
-      let validGameSessionId = gameSessionId;
-
-      if (!validGameSessionId) {
-        const sessionCheckQuery = 'SELECT game_session_id FROM game_sessions WHERE status = $1';
-        const sessionCheckResult = await pool.query(sessionCheckQuery, ['in_progress']);
-        
-        if (sessionCheckResult.rows.length === 0) {
-          const newGameSession = await GameRepository.createGameSession('aviator', 'in_progress');
-          validGameSessionId = newGameSession.game_session_id;
-        }
+      // Validate bet type
+      const validBetTypes = ['manual', 'auto', 'standard'];
+      if (!validBetTypes.includes(betType)) {
+        throw new Error(`Invalid bet type. Must be one of: ${validBetTypes.join(', ')}`);
       }
 
       const query = `
         INSERT INTO player_bets (
-          player_bet_id, 
           user_id, 
-          game_session_id, 
-          bet_amount, 
+          bet_amount,
+          game_session_id,
           cashout_multiplier, 
           status,
-          autocashout_multiplier
+          payout_amount,
+          autocashout_multiplier,
+          bet_type
         ) VALUES (
-          $1, $2, $3, $4, $5, 
-          $6, $7
-        ) RETURNING *
+          $1, $2, $3, $4, $5, $6, $7, $8
+        )
       `;
 
       const values = [
-        betId, 
         userId, 
-        validGameSessionId, 
-        amount, 
-        autocashout ? cashoutMultiplier : null,
-        autocashout ? 'active' : 'placed', 
-        autocashout ? cashoutMultiplier : null
+        betAmount,
+        null, // Explicitly set game_session_id to null
+        cashoutMultiplier,
+        status, 
+        payoutAmount,
+        autocashoutMultiplier,
+        betType
       ];
 
-      const result = await pool.query(query, values);
+      await pool.query(query, values);
 
       logger.info('BET_RECORD_CREATED', {
-        betId,
         userId,
-        amount,
-        gameSessionId: validGameSessionId,
-        status: result.rows[0].status,
-        autocashout,
-        cashoutMultiplier: result.rows[0].cashout_multiplier
+        amount: betAmount,
+        status
       });
 
-      return result.rows[0];
+      return true;
     } catch (error) {
-      logger.error('BET_RECORD_CREATION_ERROR', {
-        errorMessage: error.message,
-        betDetails: {
-          betId,
-          userId,
-          amount,
-          gameSessionId,
-          cashoutMultiplier,
-          autocashout
-        },
-        errorStack: error.stack
+      logger.error('BET_PLACEMENT_ERROR', {
+        userId,
+        betAmount,
+        errorMessage: error.message
       });
       throw error;
     }
@@ -99,24 +84,31 @@ export class PlayerBetRepository {
 
   static async activateBet(betId) {
     try {
-      // Logic to activate the bet
-      const query = `UPDATE player_bets SET status = 'active' WHERE id = $1 RETURNING *`;
+      const query = `
+        UPDATE player_bets 
+        SET status = 'active' 
+        WHERE bet_id = $1 
+        RETURNING bet_id
+      `;
       const values = [betId];
-      const result = await this.pool.query(query, values);
+      const result = await pool.query(query, values);
 
       if (result.rows.length === 0) {
         throw new Error('Bet not found or already activated');
       }
 
-      return result.rows[0]; // Return the activated bet details
+      return result.rows[0].bet_id;
     } catch (error) {
-      logger.error('BET_ACTIVATION_ERROR', { errorMessage: error.message, betId });
+      logger.error('BET_ACTIVATION_ERROR', { 
+        errorMessage: error.message, 
+        betId 
+      });
       throw new Error('Failed to activate bet');
     }
   }
 
   static async findBetById(betId) {
-    const query = 'SELECT * FROM player_bets WHERE player_bet_id = $1';
+    const query = 'SELECT * FROM player_bets WHERE bet_id = $1';
     const values = [betId];
     const result = await pool.query(query, values);
     return result.rows.length > 0 ? result.rows[0] : null;

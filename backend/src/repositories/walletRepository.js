@@ -2001,6 +2001,98 @@ export class WalletRepository {
       throw error;
     }
   }
+
+  // Deduct bet amount from wallet
+  static async deductBetAmount(userId, betAmount, betId) {
+    const client = await this.getPoolClient();
+    try {
+      // Start transaction
+      await client.query('BEGIN');
+
+      // Fetch wallet for the user
+      const walletQuery = `
+        SELECT wallet_id, user_id, balance 
+        FROM wallets 
+        WHERE user_id = $1
+        FOR UPDATE
+      `;
+      const walletResult = await client.query(walletQuery, [userId]);
+
+      // Check if wallet exists
+      if (walletResult.rows.length === 0) {
+        throw new Error('Wallet not found for user');
+      }
+
+      const wallet = walletResult.rows[0];
+      const currentBalance = parseFloat(wallet.balance);
+      const walletId = wallet.wallet_id;
+
+      // Check sufficient balance
+      if (currentBalance < betAmount) {
+        throw new Error('Insufficient wallet balance');
+      }
+
+      // Update wallet balance
+      const updateQuery = `
+        UPDATE wallets 
+        SET balance = balance - $1, 
+            updated_at = NOW() 
+        WHERE wallet_id = $2 
+        RETURNING balance
+      `;
+      const updateResult = await client.query(updateQuery, [betAmount, walletId]);
+      const newBalance = parseFloat(updateResult.rows[0].balance);
+
+      // Record transaction
+      const transactionQuery = `
+        INSERT INTO wallet_transactions 
+        (wallet_id, user_id, transaction_type, amount, description, 
+         payment_method, currency, status, reference_id) 
+        VALUES ($1, $2, 'bet', $3, 'Bet Placement', 
+                'internal', 'KSH', 'completed', $4)
+        RETURNING transaction_id
+      `;
+      const transactionResult = await client.query(transactionQuery, [
+        walletId, 
+        userId, 
+        betAmount, 
+        betId
+      ]);
+
+      // Commit transaction
+      await client.query('COMMIT');
+
+      // Emit wallet update if socket is available
+      this.safeEmitWalletUpdate({
+        userId,
+        walletId,
+        balance: newBalance,
+        transactionType: 'bet',
+        amount: betAmount
+      });
+
+      return {
+        walletId,
+        oldBalance: currentBalance,
+        newBalance,
+        transactionId: transactionResult.rows[0].transaction_id
+      };
+    } catch (error) {
+      // Rollback transaction on error
+      await client.query('ROLLBACK');
+      
+      logger.error('WALLET_BET_DEDUCTION_ERROR', {
+        userId,
+        betAmount,
+        errorMessage: error.message
+      });
+
+      throw error;
+    } finally {
+      // Release the client back to the pool
+      client.release();
+    }
+  }
 }
 
 export default WalletRepository;

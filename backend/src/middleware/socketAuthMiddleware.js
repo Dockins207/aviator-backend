@@ -7,7 +7,11 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Get JWT secret from environment
-const JWT_SECRET = process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237';
+const JWT_SECRET = process.env.JWT_SECRET ||
+                   process.env.REACT_APP_JWT_SECRET ||
+                   process.env.JWT_SECRET_KEY ||
+                   process.env.SECRET_KEY ||
+                   '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237';
 
 /**
  * Socket authentication middleware with strict token validation and logging

@@ -7,6 +7,7 @@ import logger from '../config/logger.js';
 import phoneValidator from '../utils/phoneValidator.js'; 
 import { WalletRepository } from '../repositories/walletRepository.js';
 import redisRepository from '../redis-services/redisRepository.js';
+import { validateToken, generateToken, normalizePhoneNumber } from '../utils/authUtils.js'; // Import shared authentication utilities
 
 const balanceService = {
   // Sync balance from users table to wallets table
@@ -611,8 +612,12 @@ export const authService = {
     }
 
     try {
-      // Verify JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237');
+      // Verify JWT token with multiple fallback options
+      const JWT_SECRET = process.env.JWT_SECRET || 
+                         process.env.REACT_APP_JWT_SECRET || 
+                         '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237';
+      
+      const decoded = jwt.verify(token, JWT_SECRET);
       
       return {
         id: decoded.user_id,
@@ -631,9 +636,11 @@ export const authService = {
     try {
       const redisClient = await redisRepository.getClient();
 
+      // Use shared token validation first
+      const decoded = await validateToken(token);
+
       // Check if the token is valid in Redis
       const userKey = `user_token:${token}`;
-      
       const userData = await redisClient.get(userKey);
 
       if (!userData) {
@@ -647,14 +654,16 @@ export const authService = {
       const parsedUserData = JSON.parse(userData);
       
       logger.info('Token successfully validated', { 
-        userId: parsedUserData.id 
+        userId: parsedUserData.id,
+        timestamp: new Date().toISOString()
       });
 
       return parsedUserData;
     } catch (error) {
       logger.error('Token authentication error', {
         errorMessage: error.message,
-        token: token
+        token: token,
+        timestamp: new Date().toISOString()
       });
       throw error;
     }

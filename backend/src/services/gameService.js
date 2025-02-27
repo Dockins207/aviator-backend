@@ -132,8 +132,8 @@ class GameBoardService extends EventEmitter {
         // Generate unique game ID
         const gameId = gameUtils.generateGameUUID();
         
-        // Create a database game session
-        const gameSession = await GameRepository.createGameSession('aviator', 'in_progress');
+        // Create a database game session with initial 'betting' status
+        const gameSession = await GameRepository.createGameSession('aviator', 'betting');
         
         // Initialize game state
         this.gameState = {
@@ -149,6 +149,9 @@ class GameBoardService extends EventEmitter {
 
         // Betting phase
         await this.runBettingPhase();
+        
+        // Update database session status before flying phase starts
+        await GameRepository.updateGameSessionStatus(this.gameState.gameId, 'in_progress');
 
         // Flying phase
         try {
@@ -280,7 +283,7 @@ class GameBoardService extends EventEmitter {
 
       // Start multiplier calculation
       return new Promise((resolve) => {
-        this.multiplierInterval = setInterval(() => {
+        this.multiplierInterval = setInterval(async () => {
           const currentTime = Date.now();
           const timeDiff = currentTime - this.gameState.lastUpdateTime;
           
@@ -300,7 +303,7 @@ class GameBoardService extends EventEmitter {
           // Check for crash
           if (this.gameState.multiplier >= this.gameState.crashPoint) {
             clearInterval(this.multiplierInterval);
-            this.handleGameCrash();
+            await this.handleGameCrash();
             resolve();
           }
         }, 50); // Update more frequently for smoother animation
@@ -333,27 +336,61 @@ class GameBoardService extends EventEmitter {
     }
   }
 
-  handleGameCrash() {
-    // Capture the exact crash point
-    const crashMultiplier = Number(this.gameState.multiplier.toFixed(2));
-    const crashPoint = Number(this.gameState.crashPoint.toFixed(2));
+  async handleGameCrash() {
+    // Validate game state
+    if (!this.gameState || !this.gameState.gameId) {
+      logger.error('INVALID_GAME_STATE_FOR_CRASH', {
+        gameState: this.gameState,
+        timestamp: new Date().toISOString()
+      });
+      return null;
+    }
+
+    // Capture the exact crash point as a string with 2 decimal places
+    const crashPoint = this.gameState.crashPoint.toFixed(2);
 
     // Update game state to crashed
     this.gameState.status = 'crashed';
-    this.gameState.crashMultiplier = crashMultiplier;
     this.gameState.crashTimestamp = new Date().toISOString();
 
     // Finalize all active bets as expired
     this.gameState.players.forEach(bet => {
-      betTrackingService.finalizeBet(bet.betId, 'expired', crashMultiplier);
+      betTrackingService.finalizeBet(bet.betId, 'expired', Number(crashPoint));
     });
+
+    // Mark game session as complete in the database
+    try {
+      console.log('Attempting to mark game session complete', {
+        gameSessionId: this.gameState.gameId,
+        crashPoint
+      });
+
+      // Create a new repository instance
+      const gameRepo = new GameRepository();
+
+      // Use the instance method to mark game session complete
+      const completedSession = await gameRepo.markGameSessionComplete(
+        this.gameState.gameId, 
+        {
+          crash_point: crashPoint
+        }
+      );
+
+      console.log('Game session completion result:', completedSession);
+    } catch (error) {
+      logger.error('GAME_SESSION_COMPLETE_ERROR', {
+        gameId: this.gameState.gameId,
+        errorMessage: error.message,
+        errorStack: error.stack,
+        crashPoint
+      });
+    }
 
     // Broadcast crash event with precise multiplier
     if (socketService) {
       socketService.broadcastGameStateChange({
         gameId: this.gameState.gameId,
         state: 'crashed',
-        crashMultiplier: crashMultiplier,
         crashPoint: crashPoint,
         timestamp: this.gameState.crashTimestamp
       }, true);
@@ -362,7 +399,6 @@ class GameBoardService extends EventEmitter {
     // Log crash details
     logger.warn('GAME_CRASHED', {
       gameId: this.gameState.gameId,
-      crashMultiplier: crashMultiplier,
       crashPoint: crashPoint,
       timestamp: this.gameState.crashTimestamp,
       totalPlayers: this.gameState.players.length
@@ -370,7 +406,6 @@ class GameBoardService extends EventEmitter {
 
     return {
       gameId: this.gameState.gameId,
-      crashMultiplier: crashMultiplier,
       crashPoint: crashPoint,
       timestamp: this.gameState.crashTimestamp
     };
