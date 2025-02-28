@@ -3,6 +3,7 @@ import gameUtils from '../utils/gameUtils.js';
 import betService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authService } from '../services/authService.js';
+import { validateToken } from '../utils/authUtils.js';
 import jwt from 'jsonwebtoken';
 import { EventEmitter } from 'events';
 
@@ -26,18 +27,32 @@ class GameSocket {
   }
 
   initializeSocket() {
-    this.io.on('connection', (socket) => {
-      socket.on('authenticate', async (token) => {
-        try {
-          const user = await this.authenticateUser(token);
-          socket.user = user;
-        } catch (authError) {
-          logger.error('Socket authentication failed', {
-            reason: authError.message
-          });
-          socket.disconnect(true);
+    this.io.on('connection', async (socket) => {
+      try {
+        // Get token from handshake auth or query
+        const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+        
+        if (!token) {
+          logger.warn('No token provided for socket connection');
+          socket.disconnect();
+          return;
         }
-      });
+
+        // Validate token
+        const decoded = await this.validateToken(socket, token);
+        if (!decoded) {
+          logger.warn('Invalid token for socket connection');
+          socket.disconnect();
+          return;
+        }
+
+        logger.info(`User ${decoded.userId} connected to game socket`);
+      } catch (authError) {
+        logger.error('Socket authentication failed', {
+          reason: authError.message
+        });
+        socket.disconnect(true);
+      }
 
       socket.on('error', (error) => {
         logger.error('Socket connection error', {
@@ -54,20 +69,35 @@ class GameSocket {
     this.startGameCycleWithSocketUpdates();
   }
 
-  async authenticateUser(token) {
+  async validateToken(socket, token) {
     try {
-      // Verify the JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237');
+      // Use shared token validation
+      const decoded = await validateToken(token);
       
-      // Get user profile using the decoded user ID
-      const user = await authService.getUserProfile(decoded.userId);
+      // Get user profile
+      try {
+        const user = await authService.getUserProfile(decoded.userId);
+        socket.user = user;
+      } catch (profileError) {
+        logger.warn('User profile fetch failed, using token data', {
+          userId: decoded.userId,
+          error: profileError.message
+        });
+        // Create minimal user object from token
+        socket.user = {
+          user_id: decoded.userId,
+          username: decoded.username || 'Guest User',
+          role: decoded.role || 'user',
+          is_active: true
+        };
+      }
       
-      return user;
+      return decoded;
     } catch (error) {
-      logger.error('User authentication failed', {
+      logger.error('Token validation failed', {
         reason: error.message
       });
-      throw error;
+      return null;
     }
   }
 
@@ -197,6 +227,13 @@ class GameSocket {
         // Check if user has active bets, handle case where activeBets might be undefined
         const userActiveBets = gameState.activeBets ? gameState.activeBets.filter(bet => bet.userId === userId) : [];
         const hasActiveBets = userActiveBets.length > 0;
+
+        // If user has active bets, emit betReadyForCashout for each bet
+        if (hasActiveBets) {
+          userActiveBets.forEach(bet => {
+            socket.emit('betReadyForCashout', { betId: bet.id });
+          });
+        }
 
         // Send personalized game state update to each user
         socket.emit('gameStateUpdate', {

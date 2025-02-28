@@ -2,12 +2,34 @@ services:
   - type: web
     name: aviator-backend
     env: node
-    buildCommand: npm run install:prod && npm run build
-    startCommand: npm start
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm run migrate:render && npm start
     envVars:
+      - key: NODE_VERSION
+        value: 18.x
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aviator-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromDatabase:
+          name: aviator-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PORT
+        value: 10000
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 8000
-    healthCheckPath: /health
-    autoDeploy: true
+
+databases:
+  - name: aviator-postgres
+    region: frankfurt
+    plan: free
+    databaseName: aviator
+    user: aviator_admin
+
+  - name: aviator-redis
+    region: frankfurt
+    plan: free

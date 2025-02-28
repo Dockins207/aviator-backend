@@ -4,7 +4,6 @@ import betService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import GameRepository from '../repositories/gameRepository.js';
-import redisRepository from '../redis-services/redisRepository.js';
 import gameService from '../services/gameService.js';
 
 const router = express.Router();

@@ -4,7 +4,6 @@ import { Wallet } from '../models/Wallet.js';
 import WalletSocket from '../sockets/walletSocket.js';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import redisConnection from '../config/redisConfig.js';
 
 export class WalletRepository {
   // Static field to store wallet socket instance
@@ -51,7 +50,11 @@ export class WalletRepository {
       const client = await pool.connect();
       return client;
     } catch (error) {
-      throw new Error('Unable to acquire database client');
+      logger.error('POOL_CLIENT_ERROR', {
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
     }
   }
 
@@ -113,118 +116,104 @@ export class WalletRepository {
   }
 
   // Deposit funds
-  static async deposit(userId, walletId, depositAmount, description = 'Manual Deposit', paymentMethod = 'manual', currency = 'KSH') {
+  static async deposit(
+    userId, 
+    walletId = null, 
+    amount, 
+    description = 'Deposit', 
+    transactionType = 'manual', 
+    currency = 'KSH'
+  ) {
     const client = await this.getPoolClient();
+    
     try {
       // Start transaction
       await client.query('BEGIN');
 
-      // If walletId is not provided, fetch it
+      // Find or create wallet if not specified
       if (!walletId) {
-        const walletIdQuery = `
-          SELECT wallet_id 
-          FROM wallets 
-          WHERE user_id = $1
-        `;
-        const walletIdResult = await client.query(walletIdQuery, [userId]);
-
-        // If no wallet exists, create one
-        if (walletIdResult.rows.length === 0) {
-          const createWalletQuery = `
-            INSERT INTO wallets (wallet_id, user_id, currency, balance) 
-            VALUES ($1, $2, $3, 0.00)
-            RETURNING wallet_id
-          `;
-          const newWalletResult = await client.query(createWalletQuery, [userId, userId, currency]);
-          walletId = newWalletResult.rows[0].wallet_id;
-        } else {
-          walletId = walletIdResult.rows[0].wallet_id;
+        const walletQuery = 'SELECT wallet_id FROM wallets WHERE user_id = $1';
+        const walletResult = await client.query(walletQuery, [userId]);
+        
+        if (walletResult.rows.length === 0) {
+          throw new Error('Wallet not found');
         }
+        
+        walletId = walletResult.rows[0].wallet_id;
       }
 
-      // Lock the wallet row and verify it belongs to the user
-      const walletQuery = `
-        SELECT wallet_id, user_id, balance 
-        FROM wallets 
-        WHERE wallet_id = $1 AND user_id = $2
-        FOR UPDATE
+      // Insert transaction record
+      const transactionQuery = `
+        INSERT INTO wallet_transactions 
+        (user_id, wallet_id, amount, description, transaction_type, currency)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING transaction_id, amount
       `;
-      const walletResult = await client.query(walletQuery, [walletId, userId]);
-
-      // Check if wallet exists and belongs to the user
-      if (walletResult.rows.length === 0) {
-        throw new Error('Wallet not found or does not belong to the user');
-      }
-
-      const currentWallet = walletResult.rows[0];
-      const currentBalance = parseFloat(currentWallet.balance);
-
-      // Validate deposit amount
-      const isDeposit = depositAmount > 0;
-      const isWithdrawal = depositAmount < 0;
-
-      if (!isDeposit && !isWithdrawal) {
-        throw new Error('Deposit or withdrawal amount must be non-zero');
-      }
-
-      const transactionType = isDeposit ? 'deposit' : 'withdrawal';
-      const absoluteAmount = Math.abs(depositAmount);
+      const transactionResult = await client.query(transactionQuery, [
+        userId, 
+        walletId, 
+        amount, 
+        description, 
+        transactionType,
+        currency
+      ]);
 
       // Update wallet balance
       const updateQuery = `
         UPDATE wallets 
-        SET balance = balance ${isDeposit ? '+' : '-'} $1, 
-            updated_at = NOW() 
+        SET balance = balance + $1 
         WHERE wallet_id = $2 
         RETURNING balance
       `;
-      const updateResult = await client.query(updateQuery, [absoluteAmount, walletId]);
-      const newBalance = parseFloat(updateResult.rows[0].balance);
-
-      // Record transaction
-      const transactionQuery = `
-        INSERT INTO wallet_transactions 
-        (wallet_id, user_id, transaction_type, amount, description, 
-         payment_method, currency, status) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed')
-        RETURNING transaction_id
-      `;
-      const transactionResult = await client.query(transactionQuery, [
-        walletId, 
-        userId, 
-        transactionType, 
-        absoluteAmount, 
-        description, 
-        paymentMethod,
-        currency
-      ]);
+      const updateResult = await client.query(updateQuery, [amount, walletId]);
 
       // Commit transaction
       await client.query('COMMIT');
 
-      // Emit wallet update event
+      const newBalance = parseFloat(updateResult.rows[0].balance);
+      const transactionId = transactionResult.rows[0].transaction_id;
+
+      // Emit wallet update via socket
       this.safeEmitWalletUpdate({
         userId,
         walletId,
         balance: newBalance,
-        transactionType: transactionType,
-        amount: absoluteAmount,
-        transactionId: transactionResult.rows[0].transaction_id
+        transactionId,
+        transactionType,
+        amount,
+        description,
+        timestamp: new Date().toISOString()
+      });
+
+      // Log successful deposit
+      logger.info('WALLET_DEPOSIT_SUCCESS', {
+        userId,
+        walletId,
+        amount,
+        newBalance
       });
 
       return {
-        userId,
+        success: true,
         walletId,
         newBalance,
-        transactionId: transactionResult.rows[0].transaction_id
+        transactionId
       };
+
     } catch (error) {
-      // Rollback transaction
+      // Rollback transaction on error
       await client.query('ROLLBACK');
-      
+
+      // Log deposit failure
+      logger.error('WALLET_DEPOSIT_FAILED', {
+        userId,
+        amount,
+        error: error.message
+      });
+
       throw error;
     } finally {
-      // Release the client back to the pool
+      // Always release the client
       client.release();
     }
   }
@@ -805,7 +794,7 @@ export class WalletRepository {
 
       throw error;
     } finally {
-      // Release client back to pool
+      // Release the client back to the pool
       client.release();
     }
   }
@@ -1160,304 +1149,6 @@ export class WalletRepository {
     } finally {
       // Release client back to pool
       client.release();
-    }
-  }
-
-  // Broadcast wallet balance update using Redis Pub/Sub
-  static async broadcastWalletUpdate(userId, balanceUpdate) {
-    try {
-      // Ensure pub client is available
-      const pubClient = redisConnection.getPubClient();
-
-      // Prepare payload for broadcasting
-      const payload = {
-        userId,
-        balance: balanceUpdate.newBalance,
-        previousBalance: balanceUpdate.previousBalance,
-        transactionType: balanceUpdate.transactionType || 'balance_update',
-        timestamp: new Date().toISOString()
-      };
-
-      // Publish to two channels:
-      // 1. User-specific channel
-      // 2. Global wallet updates channel
-      const userChannel = `wallet:balance:${userId}`;
-      const globalChannel = 'wallet:balance:global';
-
-      // Publish the update
-      const userPublishResult = await pubClient.publish(userChannel, JSON.stringify(payload));
-      const globalPublishResult = await pubClient.publish(globalChannel, JSON.stringify(payload));
-
-      return payload;
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Setup WebSocket server to subscribe to Redis Pub/Sub wallet updates
-  static setupWalletBalanceSubscription(io) {
-    try {
-      // Get Redis subscription client
-      const subClient = redisConnection.getSubClient();
-      const pubClient = redisConnection.getPubClient();
-
-      // Create wallet namespace explicitly
-      const walletNamespace = io.of('/wallet');
-
-      // Ensure namespace is ready
-      walletNamespace.on('connection', (socket) => {
-      });
-
-      // Subscribe to global wallet updates channel
-      subClient.subscribe('wallet:balance:global', (message, channel) => {
-        try {
-          // Ensure message is a string
-          const messageStr = typeof message === 'string' ? message : JSON.stringify(message);
-          
-          // Parse wallet update
-          let walletUpdate;
-          try {
-            walletUpdate = JSON.parse(messageStr);
-          } catch (parseError) {
-            return;
-          }
-
-          // Validate wallet update structure
-          if (!walletUpdate || !walletUpdate.userId) {
-            return;
-          }
-
-          // Broadcast to all connected clients in wallet namespace
-          walletNamespace.emit('wallet:balance:update', walletUpdate);
-        } catch (error) {
-          throw error;
-        }
-      });
-
-      // Method to dynamically subscribe to user-specific updates
-      this.subscribeToUserWalletUpdates = (userId) => {
-        const userChannel = `wallet:balance:${userId}`;
-        
-        // Subscribe to user-specific channel
-        subClient.subscribe(userChannel, (message, channel) => {
-          try {
-            // Ensure message is a string
-            const messageStr = typeof message === 'string' ? message : JSON.stringify(message);
-            
-            // Parse wallet update
-            let walletUpdate;
-            try {
-              walletUpdate = JSON.parse(messageStr);
-            } catch (parseError) {
-              return;
-            }
-
-            // Validate wallet update structure
-            if (!walletUpdate || !walletUpdate.userId) {
-              return;
-            }
-
-            // Broadcast to wallet namespace
-            walletNamespace.emit('wallet:balance:update', walletUpdate);
-          } catch (error) {
-            throw error;
-          }
-        });
-      };
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Record a wallet transaction with real-time broadcasting
-  static async recordTransaction(userId, transactionType, amount, metadata = {}) {
-    const client = await this.getPoolClient();
-
-    try {
-      // Start transaction
-      await client.query('BEGIN');
-
-      // Retrieve current balance
-      const balanceQuery = 'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE';
-      const balanceResult = await client.query(balanceQuery, [userId]);
-      const currentBalance = parseFloat(balanceResult.rows[0].balance);
-
-      // Calculate new balance based on transaction type
-      let newBalance;
-      switch (transactionType) {
-        case 'deposit':
-          newBalance = Math.max(0, currentBalance + amount);
-          break;
-        case 'withdrawal':
-          newBalance = Math.max(0, currentBalance - amount);
-          break;
-        default:
-          throw new Error(`Unsupported transaction type: ${transactionType}`);
-      }
-
-      // Validate balance
-      if (newBalance < 0) {
-        throw new Error('Insufficient funds');
-      }
-
-      // Record transaction
-      const transactionQuery = `
-        INSERT INTO wallet_transactions (
-          user_id, 
-          amount, 
-          transaction_type,
-          metadata
-        ) VALUES ($1, $2, $3, $4)
-      `;
-      await client.query(transactionQuery, [
-        userId, 
-        amount, 
-        transactionType,
-        JSON.stringify(metadata)
-      ]);
-
-      // Update wallet balance
-      const updateQuery = `
-        UPDATE wallets 
-        SET balance = $1, 
-            updated_at = CURRENT_TIMESTAMP 
-        WHERE user_id = $2
-      `;
-      await client.query(updateQuery, [Math.max(0, newBalance), userId]);
-
-      // Commit transaction
-      await client.query('COMMIT');
-
-      // Broadcast wallet update
-      const balanceUpdate = {
-        userId,
-        previousBalance: currentBalance,
-        newBalance,
-        transactionType,
-        metadata
-      };
-      await this.broadcastWalletUpdate(userId, balanceUpdate);
-
-      return balanceUpdate;
-    } catch (error) {
-      // Rollback transaction
-      await client.query('ROLLBACK');
-
-      throw error;
-    } finally {
-      // Release client
-      client.release();
-    }
-  }
-
-  static async getUserIdFromWalletId(walletId) {
-    try {
-      const query = `
-        SELECT user_id 
-        FROM wallets 
-        WHERE wallet_id = $1
-      `;
-      const result = await pool.query(query, [walletId]);
-
-      if (result.rows.length === 0) {
-        throw new Error('Wallet not found');
-      }
-
-      return result.rows[0].user_id;
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Get wallet ID for a specific user
-  static async getWalletIdByUserId(userId) {
-    try {
-      const query = `
-        SELECT wallet_id 
-        FROM wallets 
-        WHERE user_id = $1
-      `;
-      
-      const result = await pool.query(query, [userId]);
-
-      if (result.rowCount === 0) {
-        throw new Error(`No wallet found for user ID: ${userId}`);
-      }
-
-      const walletId = result.rows[0].wallet_id;
-
-      return walletId;
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Get wallet details by user ID
-  static async getWalletByUserId(userId) {
-    const client = await this.getPoolClient();
-
-    try {
-      const query = `
-        SELECT wallet_id, balance, currency, created_at, updated_at
-        FROM wallets
-        WHERE user_id = $1
-      `;
-      const result = await client.query(query, [userId]);
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      const wallet = result.rows[0];
-
-      return {
-        walletId: wallet.wallet_id,
-        userId: userId,
-        balance: parseFloat(wallet.balance),
-        currency: wallet.currency,
-        createdAt: wallet.created_at,
-        updatedAt: wallet.updated_at
-      };
-    } catch (error) {
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  // Get wallet ID for a specific user
-  static async getWalletIdByUserId(userId) {
-    const client = await this.getPoolClient();
-
-    try {
-      const query = 'SELECT wallet_id FROM wallets WHERE user_id = $1';
-      const result = await client.query(query, [userId]);
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0].wallet_id;
-    } catch (error) {
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  // Method to dynamically subscribe to user-specific updates
-  static subscribeToUserWalletUpdates(userId) {
-    try {
-      // Get Redis subscription client
-      const subClient = redisConnection.getSubClient();
-
-      // User-specific channel
-      const userChannel = `wallet:balance:${userId}`;
-
-      // Subscribe to user-specific channel
-      subClient.subscribe(userChannel);
-    } catch (error) {
-      throw error;
     }
   }
 
@@ -1986,22 +1677,6 @@ export class WalletRepository {
     }
   }
 
-  // Method to dynamically subscribe to user-specific updates
-  static subscribeToUserWalletUpdates(userId) {
-    try {
-      // Get Redis subscription client
-      const subClient = redisConnection.getSubClient();
-
-      // User-specific channel
-      const userChannel = `wallet:balance:${userId}`;
-
-      // Subscribe to user-specific channel
-      subClient.subscribe(userChannel);
-    } catch (error) {
-      throw error;
-    }
-  }
-
   // Deduct bet amount from wallet
   static async deductBetAmount(userId, betAmount, betId) {
     const client = await this.getPoolClient();
@@ -2048,14 +1723,16 @@ export class WalletRepository {
         INSERT INTO wallet_transactions 
         (wallet_id, user_id, transaction_type, amount, description, 
          payment_method, currency, status, reference_id) 
-        VALUES ($1, $2, 'bet', $3, 'Bet Placement', 
-                'internal', 'KSH', 'completed', $4)
+        VALUES ($1, $2, $3, $4, $5, 
+                'internal', 'KSH', 'completed', $6)
         RETURNING transaction_id
       `;
       const transactionResult = await client.query(transactionQuery, [
         walletId, 
         userId, 
+        'bet', 
         betAmount, 
+        'Bet Placement',
         betId
       ]);
 
@@ -2090,6 +1767,83 @@ export class WalletRepository {
       throw error;
     } finally {
       // Release the client back to the pool
+      client.release();
+    }
+  }
+
+  // Remove Redis-related methods
+  // Commented out to preserve the method signature if needed elsewhere
+  static async acquireLock(lockKey, lockValue, lockDuration) {
+    // Placeholder method, no-op
+    return true;
+  }
+
+  // Placeholder method for lock release
+  static async releaseLock(lockKey, lockValue, unlockScript) {
+    // Placeholder method, no-op
+    return true;
+  }
+
+  // Get comprehensive wallet details for real-time updates
+  static async getWalletDetails(userId) {
+    const client = await this.getPoolClient();
+    try {
+      // Fetch wallet information
+      const walletQuery = `
+        SELECT 
+          wallet_id,
+          user_id,
+          balance, 
+          currency, 
+          created_at
+        FROM wallets
+        WHERE user_id = $1
+      `;
+      const walletResult = await client.query(walletQuery, [userId]);
+      
+      if (walletResult.rows.length === 0) {
+        throw new Error('Wallet not found');
+      }
+
+      const wallet = walletResult.rows[0];
+
+      // Fetch recent transactions
+      const transactionsQuery = `
+        SELECT 
+          transaction_id as "transactionId",
+          amount,
+          description,
+          transaction_type as "transactionType",
+          created_at as "createdAt"
+        FROM wallet_transactions
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 10
+      `;
+      const transactionsResult = await client.query(transactionsQuery, [userId]);
+
+      // Log wallet details retrieval
+      logger.info('WALLET_DETAILS_RETRIEVED', {
+        userId,
+        balance: wallet.balance,
+        currency: wallet.currency
+      });
+
+      return {
+        userId,
+        walletId: wallet.wallet_id,
+        balance: parseFloat(wallet.balance),
+        currency: wallet.currency || 'KSH',
+        createdAt: wallet.created_at,
+        recentTransactions: transactionsResult.rows
+      };
+    } catch (error) {
+      logger.error('WALLET_DETAILS_RETRIEVAL_ERROR', {
+        userId,
+        error: error.message
+      });
+      throw error;
+    } finally {
       client.release();
     }
   }

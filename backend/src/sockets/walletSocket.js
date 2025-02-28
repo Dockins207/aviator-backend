@@ -12,16 +12,20 @@ class WalletSocket {
 
   setupListeners() {
     this.walletNamespace.use(async (socket, next) => {
-      const token = socket.handshake.auth.token;
-      
-      if (!token) {
-        return next(new Error('Authentication error: No token provided'));
-      }
-
       try {
-        // Use the authentication middleware to verify the token
-        const user = await this.verifyUserToken(token);
+        // Get token from handshake auth or query
+        const token = socket.handshake.auth?.token || socket.handshake.query?.token;
         
+        if (!token) {
+          return next(new Error('Authentication error: No token provided'));
+        }
+
+        // Validate token
+        const user = await this.verifyUserToken(token);
+        if (!user) {
+          return next(new Error('Authentication failed'));
+        }
+
         // Attach user information to the socket
         socket.user = user;
         next();
@@ -45,19 +49,50 @@ class WalletSocket {
       socket.on('wallet:get_balance', async () => {
         if (!socket.user) {
           socket.emit('error', { 
-            code: 'AUTH_FAILED', 
-            message: 'Authentication required' 
+            message: 'Authentication required',
+            code: 'UNAUTHORIZED'
           });
           return;
         }
-        
+
         try {
-          const balance = await this.getUserWalletBalance(socket.user.id);
-          socket.emit('wallet:balance', { balance });
+          const walletData = await this.emitUserWalletBalance(socket.user.id);
+          socket.emit('wallet:balance', walletData);
         } catch (error) {
+          socket.emit('error', {
+            message: 'Failed to retrieve wallet balance',
+            code: 'WALLET_RETRIEVAL_ERROR'
+          });
+        }
+      });
+
+      // Real-time transaction tracking
+      socket.on('wallet:track_transactions', async (options = {}) => {
+        if (!socket.user) {
           socket.emit('error', { 
-            code: 'BALANCE_FETCH_FAILED', 
-            message: 'Could not retrieve wallet balance' 
+            message: 'Authentication required',
+            code: 'UNAUTHORIZED'
+          });
+          return;
+        }
+
+        try {
+          const { limit = 10, offset = 0 } = options;
+          const transactions = await WalletRepository.getTransactionHistory(
+            socket.user.id, 
+            limit, 
+            offset
+          );
+
+          socket.emit('wallet:transactions', {
+            userId: socket.user.id,
+            transactions,
+            timestamp: new Date().toISOString()
+          });
+        } catch (error) {
+          socket.emit('error', {
+            message: 'Failed to retrieve transaction history',
+            code: 'TRANSACTION_RETRIEVAL_ERROR'
           });
         }
       });
@@ -391,24 +426,35 @@ class WalletSocket {
     return await authService.verifyUserToken(token);
   }
 
-  async emitUserWalletBalance(userId) {
+  async emitUserWalletBalance(userId, options = {}) {
     try {
-      // Add a 0.5-second delay before emitting balance
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Fetch comprehensive wallet details
+      const walletDetails = await WalletRepository.getWalletDetails(userId);
 
-      // Fetch the latest wallet balance
-      const wallet = await WalletRepository.getWalletByUserId(userId);
-      
-      if (wallet) {
-        // Broadcast balance update to all sockets for this user
-        this.walletNamespace.to(userId).emit('wallet:balance_update', {
-          userId: userId,
-          balance: wallet.balance,
-          formattedBalance: `KSH ${wallet.balance.toFixed(2)}`,
-          timestamp: new Date().toISOString()
-        });
-      }
+      // Emit wallet balance to the user's socket
+      this.walletNamespace.to(userId).emit('wallet:balance', {
+        userId,
+        walletId: walletDetails.walletId,
+        balance: walletDetails.balance,
+        currency: walletDetails.currency,
+        recentTransactions: walletDetails.recentTransactions,
+        timestamp: new Date().toISOString(),
+        requestId: options.requestId,
+        requestTimestamp: options.requestTimestamp
+      });
+
+      logger.info('WALLET_BALANCE_EMITTED', {
+        userId,
+        balance: walletDetails.balance
+      });
+
+      return walletDetails;
     } catch (error) {
+      logger.error('WALLET_BALANCE_EMISSION_ERROR', {
+        userId,
+        error: error.message
+      });
+      throw error;
     }
   }
 
@@ -433,20 +479,33 @@ class WalletSocket {
   }
 
   // Broadcast wallet update to specific user
-  async broadcastWalletUpdate(userId, walletUpdatePayload) {
+  async broadcastWalletUpdate(userId, walletData) {
     try {
-      // Find all socket connections for this user
-      const userSockets = await this.findUserSockets(userId);
+      // Find all sockets for this user in the wallet namespace
+      const userSockets = await this.walletNamespace.fetchSockets();
+      const matchingSockets = userSockets.filter(
+        socket => socket.user && socket.user.id === userId
+      );
 
-      if (userSockets.length === 0) {
-        return;
-      }
+      // Emit wallet update to all matching sockets
+      matchingSockets.forEach(socket => {
+        socket.emit('wallet:update', {
+          userId: userId,
+          balance: walletData.balance,
+          transactions: walletData.transactions || [],
+          timestamp: new Date().toISOString()
+        });
+      });
 
-      // Emit wallet update to all user's socket connections
-      userSockets.forEach(socketId => {
-        this.walletNamespace.to(socketId).emit('wallet:balance_updated', walletUpdatePayload);
+      logger.info('WALLET_BROADCAST', {
+        userId,
+        socketCount: matchingSockets.length
       });
     } catch (error) {
+      logger.error('WALLET_BROADCAST_ERROR', {
+        userId,
+        error: error.message
+      });
     }
   }
 

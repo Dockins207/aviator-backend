@@ -1,16 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
-import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken'; // Import jwt
 import { pool } from '../config/database.js';
 import logger from '../config/logger.js';
 import phoneValidator from '../utils/phoneValidator.js'; 
 import { WalletRepository } from '../repositories/walletRepository.js';
-import redisRepository from '../redis-services/redisRepository.js';
 import { validateToken, generateToken, normalizePhoneNumber } from '../utils/authUtils.js'; // Import shared authentication utilities
 
 const balanceService = {
-  // Sync balance from users table to wallets table
+  // Initialize wallet for new user
   async syncUserBalanceToWallet(userId) {
     const client = await pool.connect();
 
@@ -18,217 +17,69 @@ const balanceService = {
       // Start transaction
       await client.query('BEGIN');
 
-      // Get user's current balance from users table
-      const userBalanceQuery = `
-        SELECT balance FROM users WHERE user_id = $1
-      `;
-      const userBalanceResult = await client.query(userBalanceQuery, [userId]);
-      const currentUserBalance = userBalanceResult.rows[0].balance;
-
-      // Update or create wallet with the user's balance
+      // Create wallet if it doesn't exist
       const upsertWalletQuery = `
-        INSERT INTO wallets (user_id, balance, currency)
-        VALUES ($1, $2, 'KSH')
-        ON CONFLICT (user_id) DO UPDATE 
-        SET balance = $2, updated_at = CURRENT_TIMESTAMP
+        INSERT INTO wallets (wallet_id, user_id, balance, currency) 
+        VALUES ($1, $2, 0, 'KSH')
+        ON CONFLICT (user_id) DO NOTHING
       `;
-      await client.query(upsertWalletQuery, [userId, currentUserBalance]);
+      await client.query(upsertWalletQuery, [uuidv4(), userId]);
 
       // Commit transaction
       await client.query('COMMIT');
 
-      logger.info('User balance synced to wallet', { 
-        userId, 
-        balance: currentUserBalance 
+      logger.info('Wallet initialized', { 
+        userId
       });
 
-      return currentUserBalance;
+      return 0;
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-      logger.error('Balance sync failed', { 
-        userId, 
-        errorMessage: error.message 
-      });
-      throw error;
-    } finally {
-      client.release();
-    }
-  },
-
-  // Sync balance from wallets table to users table
-  async syncWalletBalanceToUser(userId) {
-    const client = await pool.connect();
-
-    try {
-      // Start transaction
-      await client.query('BEGIN');
-
-      // Get wallet balance
-      const walletBalanceQuery = `
-        SELECT balance FROM wallets WHERE user_id = $1
-      `;
-      const walletBalanceResult = await client.query(walletBalanceQuery, [userId]);
-      const currentWalletBalance = walletBalanceResult.rows[0].balance;
-
-      // Update users table balance
-      const updateUserBalanceQuery = `
-        UPDATE users 
-        SET balance = $1, updated_at = CURRENT_TIMESTAMP 
-        WHERE user_id = $2
-      `;
-      await client.query(updateUserBalanceQuery, [currentWalletBalance, userId]);
-
-      // Commit transaction
-      await client.query('COMMIT');
-
-      logger.info('Wallet balance synced to user', { 
-        userId, 
-        balance: currentWalletBalance 
-      });
-
-      return currentWalletBalance;
-    } catch (error) {
-      // Rollback transaction on error
-      await client.query('ROLLBACK');
-      logger.error('Wallet balance sync failed', { 
-        userId, 
-        errorMessage: error.message 
-      });
-      throw error;
-    } finally {
-      client.release();
-    }
-  },
-
-  // Initialize wallet during user registration with existing balance
-  async initializeWalletFromUserBalance(userId) {
-    const client = await pool.connect();
-
-    try {
-      // Start transaction
-      await client.query('BEGIN');
-
-      // Get user's current balance from users table
-      const userBalanceQuery = `
-        SELECT balance FROM users WHERE user_id = $1
-      `;
-      const userBalanceResult = await client.query(userBalanceQuery, [userId]);
-      const currentUserBalance = userBalanceResult.rows[0]?.balance || 0;
-
-      logger.info('Wallet initialization attempt', {
-        userId,
-        userTableBalance: currentUserBalance
-      });
-
-      // Create or update wallet with user's existing balance
-      const upsertWalletQuery = `
-        INSERT INTO wallets (user_id, balance, currency, created_at, updated_at)
-        VALUES ($1, $2, 'KSH', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (user_id) DO UPDATE 
-        SET balance = EXCLUDED.balance, 
-            updated_at = CURRENT_TIMESTAMP
-        RETURNING balance
-      `;
-      const walletResult = await client.query(upsertWalletQuery, [userId, currentUserBalance]);
-
-      // Commit transaction
-      await client.query('COMMIT');
-
-      const finalWalletBalance = walletResult.rows[0]?.balance;
-
-      logger.info('Wallet initialized successfully', { 
-        userId, 
-        initialBalance: currentUserBalance,
-        finalWalletBalance: finalWalletBalance
-      });
-
-      return finalWalletBalance;
-    } catch (error) {
-      // Rollback transaction on error
-      await client.query('ROLLBACK');
-      
       logger.error('Wallet initialization failed', { 
         userId, 
-        errorMessage: error.message,
-        errorStack: error.stack
+        errorMessage: error.message 
       });
-
-      // If initialization fails, return 0 to prevent login failure
-      return 0;
+      throw error;
     } finally {
       client.release();
     }
   },
 
-  // Periodic balance synchronization
-  async syncWalletAndUserBalances() {
-    const traceId = uuidv4();
+  // Get wallet balance
+  async getWalletBalance(userId) {
     try {
-      logger.info(`[${traceId}] Starting comprehensive balance synchronization`);
-
-      // Query to find discrepancies between wallet and user balances
-      const discrepancyQuery = `
-        SELECT 
-          u.user_id, 
-          u.balance AS user_balance, 
-          w.balance AS wallet_balance,
-          w.updated_at AS wallet_updated_at
-        FROM users u
-        JOIN wallets w ON u.user_id = w.user_id
-        WHERE 
-          ABS(u.balance - w.balance) > 0.01  -- Allow small floating-point differences
-          OR u.balance IS NULL 
-          OR w.balance IS NULL
+      const walletQuery = `
+        SELECT balance, currency 
+        FROM wallets 
+        WHERE user_id = $1
       `;
-
-      const discrepancyResult = await pool.query(discrepancyQuery);
-
-      logger.info(`[${traceId}] Balance discrepancies found`, {
-        discrepancyCount: discrepancyResult.rows.length
-      });
-
-      // Sync balances for users with discrepancies
-      for (const discrepancy of discrepancyResult.rows) {
-        const { user_id, wallet_balance, wallet_updated_at } = discrepancy;
-
-        try {
-          // Update user balance from wallet
-          const updateUserQuery = `
-            UPDATE users 
-            SET 
-              balance = $1, 
-              updated_at = $2
-            WHERE user_id = $3
-          `;
-          
-          await pool.query(updateUserQuery, [
-            parseFloat(wallet_balance), 
-            wallet_updated_at, 
-            user_id
-          ]);
-
-          logger.info(`[${traceId}] Balance synchronized for user`, {
-            userId: user_id,
-            newBalance: wallet_balance
-          });
-        } catch (updateError) {
-          logger.error(`[${traceId}] Balance sync failed for user`, {
-            userId: user_id,
-            errorMessage: updateError.message
-          });
-        }
+      const result = await pool.query(walletQuery, [userId]);
+      if (result.rows.length > 0) {
+        const { balance, currency } = result.rows[0];
+        return {
+          balance: parseFloat(balance),
+          currency,
+          formattedBalance: `${currency} ${parseFloat(balance).toFixed(2)}`
+        };
       }
-
-      return discrepancyResult.rows.length;
+      return {
+        balance: 0,
+        currency: 'KSH',
+        formattedBalance: 'KSH 0.00'
+      };
     } catch (error) {
-      logger.error(`[${traceId}] Comprehensive balance sync failed`, {
-        errorMessage: error.message,
-        errorStack: error.stack
+      logger.error('Failed to get wallet balance', {
+        userId,
+        error: error.message
       });
-      throw error;
+      return {
+        balance: 0,
+        currency: 'KSH',
+        formattedBalance: 'KSH 0.00'
+      };
     }
-  },
+  }
 };
 
 const formatBalance = (balance, currency = 'KSH') => {
@@ -471,7 +322,20 @@ export const authService = {
       const normalizedPhoneNumber = validationResult.normalizedNumber;
 
       // Find user by normalized phone number
-      const userQuery = 'SELECT * FROM users WHERE phone_number = $1';
+      const userQuery = `
+        SELECT 
+          user_id,
+          username,
+          password_hash,
+          phone_number,
+          role,
+          is_active,
+          last_login,
+          created_at,
+          updated_at
+        FROM users 
+        WHERE phone_number = $1
+      `;
       const userResult = await pool.query(userQuery, [normalizedPhoneNumber]);
 
       if (userResult.rows.length === 0) {
@@ -498,84 +362,22 @@ export const authService = {
       // Update last login
       await pool.query('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = $1', [user.user_id]);
 
-      // Fetch the most recent wallet balance
-      const walletBalanceQuery = `
-        SELECT balance 
-        FROM wallets 
-        WHERE user_id = $1 
-        ORDER BY updated_at DESC 
-        LIMIT 1
-      `;
-      const walletBalanceResult = await pool.query(walletBalanceQuery, [user.user_id]);
-      const currentBalance = walletBalanceResult.rows.length > 0 
-        ? parseFloat(walletBalanceResult.rows[0].balance) 
-        : 0;
+      // Initialize wallet if needed and get balance
+      await balanceService.syncUserBalanceToWallet(user.user_id);
+      const walletInfo = await balanceService.getWalletBalance(user.user_id);
 
-      const balanceSource = walletBalanceResult.rows.length > 0 
-        ? 'wallet_balance' 
-        : 'user_balance';
-
-      // Generate JWT token instead of custom token
+      // Generate JWT token
       const token = jwt.sign(
         {
           user_id: user.user_id,
           username: user.username,
-          role: user.role || 'user',  // Default role if not specified
-          roles: user.roles || ['user'],  // Add roles array
+          role: user.role || 'player',
           phone_number: user.phone_number,
           is_active: user.is_active || false
         },
         process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237', 
         { expiresIn: '7d' }
       );
-
-      // Optional: Still store token details in Redis for additional tracking
-      try {
-        const redisClient = await redisRepository.ensureClientReady();
-        const userTokenKey = `user_token:${user.user_id}`;
-        
-        // Comprehensive token storage with enhanced error handling
-        await redisClient.set(
-          userTokenKey, 
-          JSON.stringify({
-            token,
-            userId: user.user_id,
-            username: user.username,
-            lastLogin: new Date().toISOString(),
-            loginTraceId: traceId
-          }),
-          {
-            EX: 7 * 24 * 60 * 60, // 7 days in seconds
-            NX: true  // Only set if key does not exist
-          }
-        );
-
-        // Optional: Add a secondary tracking mechanism
-        await redisClient.sAdd('active_user_tokens', userTokenKey);
-      } catch (redisError) {
-        logger.error(`[${traceId}] CRITICAL_REDIS_TOKEN_STORAGE_ERROR`, {
-          reason: redisError.message,
-          errorCode: redisError.code,
-          errorStack: redisError.stack,
-          context: 'login_token_storage',
-          userId: user.user_id,
-          timestamp: new Date().toISOString()
-        });
-
-        // More aggressive error handling
-        if (redisError.code === 'CONNECTION_CLOSED' || 
-            redisError.code === 'CONNECTION_REFUSED') {
-          // Attempt to reconnect or reinitialize Redis
-          try {
-            await redisRepository.initializeClient();
-          } catch (reInitError) {
-            logger.error('REDIS_REINITIALIZATION_FAILED', {
-              errorMessage: reInitError.message,
-              timestamp: new Date().toISOString()
-            });
-          }
-        }
-      }
 
       logger.info(`[${traceId}] User JWT token generated`, {
         userId: user.user_id
@@ -592,8 +394,11 @@ export const authService = {
           userId: user.user_id,
           username: user.username,
           phoneNumber: user.phone_number,
-          role: user.role || 'user',
-          isActive: user.is_active || false
+          role: user.role || 'player',
+          isActive: user.is_active || false,
+          balance: walletInfo.balance,
+          currency: walletInfo.currency,
+          formattedBalance: walletInfo.formattedBalance
         }
       };
     } catch (error) {
@@ -634,31 +439,31 @@ export const authService = {
 
   async authenticateUserByToken(token) {
     try {
-      const redisClient = await redisRepository.getClient();
-
       // Use shared token validation first
       const decoded = await validateToken(token);
 
       // Check if the token is valid in Redis
-      const userKey = `user_token:${token}`;
-      const userData = await redisClient.get(userKey);
+      // const redisClient = await redisRepository.getClient();
 
-      if (!userData) {
-        logger.warn('Token validation failed', { 
-          message: 'Invalid or expired token',
-          token: token 
-        });
-        throw new Error('Invalid or expired token');
-      }
+      // const userTokenKey = `user_token:${token}`;
+      // const userData = await redisClient.get(userTokenKey);
 
-      const parsedUserData = JSON.parse(userData);
+      // if (!userData) {
+      //   logger.warn('Token validation failed', { 
+      //     message: 'Invalid or expired token',
+      //     token: token 
+      //   });
+      //   throw new Error('Invalid or expired token');
+      // }
+
+      // const parsedUserData = JSON.parse(userData);
       
       logger.info('Token successfully validated', { 
-        userId: parsedUserData.id,
+        userId: decoded.user_id,
         timestamp: new Date().toISOString()
       });
 
-      return parsedUserData;
+      return decoded;
     } catch (error) {
       logger.error('Token authentication error', {
         errorMessage: error.message,
@@ -673,8 +478,8 @@ export const authService = {
     try {
       const query = `
         SELECT 
-          user_id, username, phone_number, balance, 
-          role, verification_status, last_login, created_at 
+          user_id, username, phone_number, role, 
+          verification_status, last_login, created_at 
         FROM users 
         WHERE user_id = $1
       `;
@@ -698,17 +503,19 @@ export const authService = {
 
   async getUserProfile(userId, autoActivate = false) {
     try {
-      const query = `
+      logger.debug('FETCHING_USER_PROFILE', {
+        userId,
+        autoActivate
+      });
+
+      // First get user data
+      const userQuery = `
         SELECT 
-          user_id, 
-          username, 
-          phone_number, 
-          role, 
-          verification_status, 
-          is_active, 
-          profile_picture_url, 
-          referral_code, 
-          referred_by,
+          user_id,
+          username,
+          phone_number,
+          role,
+          is_active,
           last_login,
           last_password_change,
           created_at,
@@ -717,50 +524,117 @@ export const authService = {
         WHERE user_id = $1
       `;
       
-      const result = await pool.query(query, [userId]);
+      const userResult = await pool.query(userQuery, [userId]);
       
-      if (result.rows.length === 0) {
-        throw new Error('User profile not found');
+      if (userResult.rows.length === 0) {
+        logger.warn('USER_PROFILE_NOT_FOUND', {
+          userId,
+          action: 'Creating default profile'
+        });
+
+        // Create a default profile for valid tokens
+        const defaultProfile = {
+          user_id: userId || crypto.randomUUID(), // Use provided userId or generate a new one
+          username: 'Guest User',
+          phone_number: '',
+          role: 'player',  // Changed from 'user' to 'player'
+          is_active: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        };
+
+        // Insert default profile
+        const insertQuery = `
+          INSERT INTO users (
+            user_id, 
+            username, 
+            phone_number, 
+            role, 
+            is_active, 
+            created_at, 
+            updated_at, 
+            password_hash,
+            salt
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING *
+        `;
+
+        // Generate a secure random password hash for default profile
+        const defaultPasswordHash = await bcrypt.hash(crypto.randomUUID(), 10);
+
+        // Generate a secure random salt
+        const salt = crypto.randomBytes(16).toString('hex');
+
+        const insertResult = await pool.query(insertQuery, [
+          defaultProfile.user_id,
+          defaultProfile.username,
+          defaultProfile.phone_number,
+          defaultProfile.role,
+          defaultProfile.is_active,
+          defaultProfile.created_at,
+          defaultProfile.updated_at,
+          defaultPasswordHash,
+          salt  // Add generated salt
+        ]);
+
+        return insertResult.rows[0];
       }
       
-      const userProfile = result.rows[0];
-      
-      // Debug log for username
-      console.log('Retrieved User Profile:', {
-        userId,
-        username: userProfile.username
-      });
+      const userProfile = userResult.rows[0];
 
-      // Fetch wallet balance
+      // Get wallet data
       const walletQuery = `
         SELECT balance, currency 
         FROM wallets 
         WHERE user_id = $1
       `;
-      const walletResult = await pool.query(walletQuery, [userId]);
       
-      // Prepare base profile
-      const profileWithWallet = {
-        ...userProfile,
-        wallet: walletResult.rows.length > 0 
-          ? {
-              balance: parseFloat(walletResult.rows[0].balance),
-              currency: walletResult.rows[0].currency
-            } 
-          : null
-      };
+      try {
+        const walletResult = await pool.query(walletQuery, [userId]);
+        if (walletResult.rows.length > 0) {
+          const { balance, currency } = walletResult.rows[0];
+          userProfile.balance = {
+            balance: parseFloat(balance),
+            currency,
+            formattedBalance: `${currency} ${parseFloat(balance).toFixed(2)}`
+          };
+        } else {
+          userProfile.balance = {
+            balance: 0,
+            currency: 'KSH',
+            formattedBalance: 'KSH 0.00'
+          };
+        }
+      } catch (walletError) {
+        logger.warn('Failed to fetch wallet balance', {
+          userId,
+          error: walletError.message
+        });
+        userProfile.balance = {
+          balance: 0,
+          currency: 'KSH',
+          formattedBalance: 'KSH 0.00'
+        };
+      }
+      
+      // Debug log for username
+      logger.debug('RETRIEVED_USER_PROFILE', {
+        userId,
+        username: userProfile.username
+      });
 
-      // Auto-activate if requested
-      if (autoActivate) {
-        return await this.autoActivateUserAccount(profileWithWallet);
+      // If auto-activate is enabled and user is not active
+      if (autoActivate && !userProfile.is_active) {
+        return await this.autoActivateUserAccount(userProfile);
       }
 
-      return profileWithWallet;
+      return userProfile;
+
     } catch (error) {
-      logger.error('Error retrieving user profile', { 
-        userId, 
-        errorMessage: error.message,
-        errorStack: error.stack
+      logger.error('ERROR_FETCHING_USER_PROFILE', {
+        userId,
+        error: error.message,
+        stack: error.stack
       });
       throw error;
     }
@@ -1047,7 +921,8 @@ export const authService = {
           {
             user_id: userProfile.user_id,
             username: userProfile.username,
-            roles: userProfile.roles || ['user']
+            phone_number: userProfile.phone_number,
+            is_active: userProfile.is_active || false
           },
           process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237',
           { 

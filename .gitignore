@@ -5,12 +5,11 @@ yarn-debug.log*
 yarn-error.log*
 
 # Production build directories
-dist/
+.dist/
 build/
 out/
 
 # Environment files
-.env
 .env.local
 .env.development.local
 .env.test.local
@@ -37,7 +36,6 @@ ehthumbs.db
 Thumbs.db
 
 # Testing
-coverage/
 .nyc_output/
 
 # Temporary files
@@ -54,7 +52,6 @@ coverage/
 
 # Specific project ignores
 frontend/dist
-backend/dist
 admin/dist
 database/data
 
@@ -62,3 +59,13 @@ database/data
 .pnp
 .pnp.js
 .cache/
+
+# Render deployment
+node_modules/
+.env
+*.log
+.DS_Store
+coverage/
+dist/
+backend/dist/
+backend/node_modules/

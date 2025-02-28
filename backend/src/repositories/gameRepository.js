@@ -4,6 +4,7 @@ import logger from '../config/logger.js';
 import { GameSession } from '../models/GameSession.js';
 import { PlayerBet } from '../models/PlayerBet.js';
 import { pool as dbPool } from '../config/database.js';
+import { redisClient } from '../config/redis.js';
 
 const { Pool } = pkg;
 
@@ -15,6 +16,95 @@ class GameRepository {
       service: 'aviator-backend',
       usingCustomPool: !!customPool
     });
+  }
+
+  /**
+   * Generate a new unique game session ID
+   * @returns {string} Newly generated UUID
+   */
+  static generateGameSessionId() {
+    return crypto.randomUUID();
+  }
+
+  /**
+   * Validate and normalize game session ID
+   * @param {string} gameSessionId - Game session ID to validate
+   * @returns {string} Normalized game session ID
+   * @throws {Error} If the game session ID is invalid
+   */
+  static normalizeGameSessionId(gameSessionId) {
+    // If it's already a standard UUID, return as-is
+    if (this.isValidUUID(gameSessionId)) {
+      return gameSessionId;
+    }
+
+    // If it's a placeholder or invalid, generate a new UUID
+    if (!gameSessionId || gameSessionId === 'currentGameSessionId') {
+      logger.warn('INVALID_GAME_SESSION_ID_GENERATED', {
+        providedId: gameSessionId
+      });
+      return this.generateGameSessionId();
+    }
+    
+    // Create a deterministic UUID from the input
+    const hash = crypto.createHash('md5').update(gameSessionId).digest('hex');
+    const normalizedId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(12,15)}-8${hash.slice(15,18)}-${hash.slice(18,30)}`;
+    
+    logger.info('GAME_SESSION_ID_NORMALIZED', {
+      originalId: gameSessionId,
+      normalizedId
+    });
+
+    return normalizedId;
+  }
+
+  /**
+   * Validate if a given string is a valid UUID
+   * @param {string} uuid - UUID to validate
+   * @returns {boolean} Whether the UUID is valid
+   */
+  static isValidUUID(uuid) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuid && typeof uuid === 'string' && uuidRegex.test(uuid);
+  }
+
+  /**
+   * Create a new game session
+   * @param {Object} sessionData - Data for the new game session
+   * @returns {Promise<string>} Created game session ID
+   */
+  async createGameSession(sessionData = {}) {
+    const gameSessionId = GameRepository.generateGameSessionId();
+    
+    try {
+      const query = `
+        INSERT INTO game_sessions 
+        (game_session_id, status, game_type, created_at, total_bet_amount)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 0)
+        RETURNING game_session_id
+      `;
+
+      const values = [
+        gameSessionId, 
+        sessionData.status || 'in_progress',
+        sessionData.gameType || 'aviator'
+      ];
+
+      await this.pool.query(query, values);
+
+      logger.info('GAME_SESSION_CREATED', {
+        gameSessionId,
+        gameType: values[2]
+      });
+
+      return gameSessionId;
+    } catch (error) {
+      logger.error('GAME_SESSION_CREATION_ERROR', {
+        errorMessage: error.message,
+        sessionData
+      });
+      throw error;
+    }
   }
 
   /**
@@ -355,16 +445,16 @@ class GameRepository {
       const gameSessionQuery = `
         UPDATE game_sessions 
         SET 
-          status = $2, 
-          crash_point = $3
-        WHERE game_session_id = $1
+          status = $1::game_status, 
+          crash_point = $2
+        WHERE game_session_id = $3
         RETURNING *
       `;
-
+      
       const gameSessionResult = await this.pool.query(gameSessionQuery, [
-        normalizedGameSessionId, 
         status, 
-        crashPoint
+        crashPoint, 
+        normalizedGameSessionId
       ]);
 
       if (gameSessionResult.rows.length === 0) {
@@ -560,40 +650,80 @@ class GameRepository {
    * @param {string} status - New status for the game session
    * @returns {Promise<Object>} Updated game session
    */
-  static async updateGameSessionStatus(gameSessionId, status) {
+  async updateGameSessionStatus(gameSessionId, status) {
+    const client = await this.pool.connect();
+    
     try {
-      const query = `
+      await client.query('BEGIN');
+
+      // Update game session status
+      const updateQuery = `
         UPDATE game_sessions 
-        SET status = $2
-        WHERE game_session_id = $1
-        RETURNING game_session_id, game_type, status, created_at
+        SET status = $2::game_status 
+        WHERE game_session_id = $1 
+        RETURNING *
       `;
-
-      const result = await dbPool.query(query, [gameSessionId, status]);
-
+      
+      const result = await client.query(updateQuery, [gameSessionId, status]);
+      
       if (result.rows.length === 0) {
-        logger.warn('GAME_SESSION_UPDATE_NOT_FOUND', {
+        logger.warn('UPDATE_GAME_SESSION_STATUS_NOT_FOUND', {
           gameSessionId,
           status
         });
         return null;
       }
 
-      logger.info('GAME_SESSION_STATUS_UPDATED', {
-        gameSessionId,
-        newStatus: status,
-        timestamp: new Date().toISOString()
-      });
+      // Handle Redis operations based on game status
+      const redisBetsKey = `game:${gameSessionId}:active_bets`;
 
+      if (status === 'in_progress') {
+        // Get and push active bets to Redis when game starts
+        const activeBetsQuery = `
+          SELECT * FROM get_active_bets_for_redis($1)
+        `;
+        
+        const activeBetsResult = await client.query(activeBetsQuery, [gameSessionId]);
+        
+        if (activeBetsResult.rows.length > 0) {
+          const redisData = activeBetsResult.rows.map(bet => ({
+            betId: bet.bet_id,
+            userId: bet.user_id,
+            betAmount: bet.bet_amount,
+            autoCashoutMultiplier: bet.autocashout_multiplier,
+            gameSessionId: bet.game_session_id,
+            status: bet.status
+          }));
+
+          await redisClient.set(redisBetsKey, JSON.stringify(redisData));
+
+          logger.info('ACTIVE_BETS_PUSHED_TO_REDIS', {
+            gameSessionId,
+            betCount: redisData.length
+          });
+        }
+      } else if (status === 'completed') {
+        // Clear Redis data when game ends
+        await redisClient.del(redisBetsKey);
+        
+        logger.info('REDIS_GAME_DATA_CLEARED', {
+          gameSessionId
+        });
+      }
+
+      await client.query('COMMIT');
       return result.rows[0];
     } catch (error) {
-      logger.error('GAME_SESSION_STATUS_UPDATE_ERROR', {
-        errorMessage: error.message,
+      await client.query('ROLLBACK');
+      logger.error('UPDATE_GAME_SESSION_STATUS_ERROR', {
         gameSessionId,
         status,
-        timestamp: new Date().toISOString()
+        errorMessage: error.message,
+        errorStack: error.stack
       });
       throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -1380,7 +1510,7 @@ class GameRepository {
     try {
       const query = `
         UPDATE game_sessions 
-        SET status = $2
+        SET status = $2::game_status
         WHERE game_session_id = $1
         RETURNING game_session_id, game_type, status, created_at
       `;
@@ -1640,7 +1770,7 @@ class GameRepository {
       const query = `
         UPDATE game_sessions
         SET 
-          status = 'completed', 
+          status = $3::game_status, 
           crash_point_history = $2::JSONB
         WHERE game_session_id = $1
         RETURNING *
@@ -1652,41 +1782,61 @@ class GameRepository {
         crashPointEntry
       });
 
-      // Execute the query
-      const result = await client.query(query, [
-        gameSessionId, 
-        crashPointEntry
-      ]);
+      try {
+        // Execute the query
+        const result = await client.query(query, [
+          gameSessionId, 
+          crashPointEntry,
+          'completed'
+        ]);
 
-      // Commit transaction
-      await client.query('COMMIT');
+        // Commit transaction
+        await client.query('COMMIT');
 
-      if (result.rows.length === 0) {
-        console.warn('GAME_SESSION_COMPLETE_FAILED', {
+        if (result.rows.length === 0) {
+          console.warn('GAME_SESSION_COMPLETE_FAILED', {
+            gameSessionId,
+            reason: 'Game session not found'
+          });
+          logger.warn('GAME_SESSION_COMPLETE_FAILED', {
+            gameSessionId,
+            reason: 'Game session not found'
+          });
+          return null;
+        }
+
+        // Log successful game session completion
+        console.log('GAME_SESSION_COMPLETED', {
           gameSessionId,
-          reason: 'Game session not found'
+          status: result.rows[0].status,
+          crashPointHistory: result.rows[0].crash_point_history
         });
-        logger.warn('GAME_SESSION_COMPLETE_FAILED', {
+
+        logger.info('GAME_SESSION_COMPLETED', {
           gameSessionId,
-          reason: 'Game session not found'
+          status: result.rows[0].status,
+          crashPointHistory: result.rows[0].crash_point_history
         });
-        return null;
+
+        return result.rows[0];
+      } catch (error) {
+        console.error('GAME_SESSION_COMPLETE_ERROR', {
+          gameSessionId,
+          errorMessage: error.message,
+          errorStack: error.stack,
+          errorDetails: {
+            sqlState: error.code,
+            detail: error.detail,
+            hint: error.hint
+          }
+        });
+        logger.error('GAME_SESSION_COMPLETE_ERROR', {
+          gameSessionId,
+          errorMessage: error.message,
+          errorStack: error.stack
+        });
+        throw error;
       }
-
-      // Log successful game session completion
-      console.log('GAME_SESSION_COMPLETED', {
-        gameSessionId,
-        status: result.rows[0].status,
-        crashPointHistory: result.rows[0].crash_point_history
-      });
-
-      logger.info('GAME_SESSION_COMPLETED', {
-        gameSessionId,
-        status: result.rows[0].status,
-        crashPointHistory: result.rows[0].crash_point_history
-      });
-
-      return result.rows[0];
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
@@ -1710,6 +1860,96 @@ class GameRepository {
     } finally {
       // Release the client back to the pool
       client.release();
+    }
+  }
+
+  /**
+   * Fetch the current active game session
+   * @param {string} [gameType='aviator'] - Type of game to fetch session for
+   * @returns {Promise<string|null>} Active game session ID or null if no active session
+   */
+  async getCurrentActiveGameSession(gameType = 'aviator') {
+    try {
+      const query = `
+        SELECT game_session_id 
+        FROM game_sessions 
+        WHERE 
+          status = 'in_progress' AND 
+          game_type = $1 AND 
+          created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `;
+
+      const result = await this.pool.query(query, [gameType]);
+
+      if (result.rows.length > 0) {
+        const gameSessionId = result.rows[0].game_session_id;
+
+        logger.info('ACTIVE_GAME_SESSION_RETRIEVED', {
+          gameSessionId,
+          gameType
+        });
+
+        return gameSessionId;
+      }
+
+      // If no active session, create a new one
+      return this.createGameSession({ 
+        gameType, 
+        status: 'in_progress' 
+      });
+    } catch (error) {
+      logger.error('CURRENT_GAME_SESSION_RETRIEVAL_ERROR', {
+        gameType,
+        errorMessage: error.message
+      });
+      
+      // Fallback to creating a new session if retrieval fails
+      return this.createGameSession({ 
+        gameType, 
+        status: 'in_progress' 
+      });
+    }
+  }
+
+  /**
+   * Update total bet amount for a game session
+   * @param {string} gameSessionId - ID of the game session
+   * @param {number} betAmount - Amount to add to total bets
+   * @returns {Promise<number>} Updated total bet amount
+   */
+  async updateSessionTotalBetAmount(gameSessionId, betAmount) {
+    try {
+      const query = `
+        UPDATE game_sessions
+        SET total_bet_amount = total_bet_amount + $1
+        WHERE game_session_id = $2
+        RETURNING total_bet_amount
+      `;
+
+      const result = await this.pool.query(query, [betAmount, gameSessionId]);
+
+      if (result.rows.length > 0) {
+        const totalBetAmount = result.rows[0].total_bet_amount;
+
+        logger.info('SESSION_TOTAL_BET_UPDATED', {
+          gameSessionId,
+          betAmount,
+          totalBetAmount
+        });
+
+        return totalBetAmount;
+      }
+
+      throw new Error('Game session not found');
+    } catch (error) {
+      logger.error('SESSION_TOTAL_BET_UPDATE_ERROR', {
+        gameSessionId,
+        betAmount,
+        errorMessage: error.message
+      });
+      throw error;
     }
   }
 }

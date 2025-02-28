@@ -1,23 +1,52 @@
 import { Sequelize, Op } from 'sequelize';
-import crypto from 'crypto';
+import * as crypto from 'crypto';
+import bcrypt from 'bcrypt';
 import ChatMessage from '../models/ChatMessage.js';
 import logger from '../config/logger.js';
 import { pool } from '../config/database.js';
-import chatRedisService from '../redis-services/chatRedisService.js';
 
 // Ensure a default group chat exists
 async function ensureDefaultGroupChat() {
   try {
     // Find a system user to use as sender_id for the default group chat
-    const userQuery = 'SELECT user_id FROM users WHERE role = $1 LIMIT 1';
-    const userResult = await pool.query(userQuery, ['admin']);
+    let userQuery = 'SELECT user_id FROM users WHERE role = $1 LIMIT 1';
+    let userResult = await pool.query(userQuery, ['admin']);
     
+    let systemUserId;
     if (userResult.rows.length === 0) {
-      logger.error('NO_SYSTEM_USER_FOUND', { message: 'Cannot create default group chat without a system user' });
-      return;
+      // Fallback to creating a system admin user if no admin exists
+      const hashedPassword = await bcrypt.hash('SystemAdmin123!', 10);
+      const salt = crypto.randomBytes(16).toString('hex');
+      const createUserQuery = `
+        INSERT INTO users (
+          username, 
+          phone_number,
+          password_hash, 
+          role, 
+          verification_status, 
+          is_active,
+          salt
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING user_id
+      `;
+      const newUserResult = await pool.query(createUserQuery, [
+        'system_admin', 
+        '+1234567893', // Unique phone number
+        hashedPassword, 
+        'admin',
+        'verified',
+        true,
+        salt
+      ]);
+      systemUserId = newUserResult.rows[0].user_id;
+      
+      logger.info('SYSTEM_USER_CREATED', { 
+        message: 'Created system admin user for group chat',
+        userId: systemUserId 
+      });
+    } else {
+      systemUserId = userResult.rows[0].user_id;
     }
-
-    const systemUserId = userResult.rows[0].user_id;
 
     const query = `
       INSERT INTO group_chats (sender_id, message, name)
@@ -30,7 +59,10 @@ async function ensureDefaultGroupChat() {
       'Main Group'
     ]);
   } catch (error) {
-    logger.error('DEFAULT_GROUP_CHAT_CREATION_ERROR', { error: error.message });
+    logger.error('DEFAULT_GROUP_CHAT_CREATION_ERROR', { 
+      error: error.message,
+      stack: error.stack 
+    });
   }
 }
 
@@ -157,17 +189,17 @@ class ChatService {
       // Validate message before caching and publishing
       if (savedMessageId) {
         // Cache in Redis (background, non-blocking)
-        await chatRedisService.cacheMessage({
-          id: savedMessageId,
-          ...messageData
-        }).catch(err => logger.warn('REDIS_CACHE_FAILED', { error: err.message }));
+        // await chatRedisService.cacheMessage({
+        //   id: savedMessageId,
+        //   ...messageData
+        // }).catch(err => logger.warn('REDIS_CACHE_FAILED', { error: err.message }));
         
         // Publish real-time event (background, non-blocking)
-        await chatRedisService.publishMessage({
-          id: savedMessageId,
-          ...messageData
-        })
-          .catch(err => logger.warn('REDIS_PUBLISH_FAILED', { error: err.message }));
+        // await chatRedisService.publishMessage({
+        //   id: savedMessageId,
+        //   ...messageData
+        // })
+        //   .catch(err => logger.warn('REDIS_PUBLISH_FAILED', { error: err.message }));
       }
       
       return savedMessageId;
@@ -226,11 +258,11 @@ class ChatService {
       }
 
       // First, try to get cached messages from Redis
-      const cachedMessages = await chatRedisService.getCachedMessages(currentUserId, 'group');
+      // const cachedMessages = await chatRedisService.getCachedMessages(currentUserId, 'group');
       
-      if (cachedMessages && cachedMessages.length > 0) {
-        return cachedMessages;
-      }
+      // if (cachedMessages && cachedMessages.length > 0) {
+      //   return cachedMessages;
+      // }
       
       // If no cached messages, fetch from PostgreSQL
       const messages = await ChatMessage.findAll({
@@ -239,16 +271,16 @@ class ChatService {
       });
       
       // Cache fetched messages in background
-      if (messages && messages.length > 0) {
-        // Cache each message 
-        for (const message of messages) {
-          await chatRedisService.cacheMessage({
-            ...message,
-            sender_id: currentUserId,
-            receiver_id: 'group'
-          }).catch(err => logger.warn('REDIS_CACHE_MESSAGE_FAILED', { error: err.message }));
-        }
-      }
+      // if (messages && messages.length > 0) {
+      //   // Cache each message 
+      //   for (const message of messages) {
+      //     await chatRedisService.cacheMessage({
+      //       ...message,
+      //       sender_id: currentUserId,
+      //       receiver_id: 'group'
+      //     }).catch(err => logger.warn('REDIS_CACHE_MESSAGE_FAILED', { error: err.message }));
+      //   }
+      // }
       
       return messages;
     } catch (error) {
@@ -331,7 +363,7 @@ class ChatService {
       const updatedMessages = await ChatMessage.updateStatus(senderId, receiverId);
       
       // Invalidate Redis cache for this conversation
-      await chatRedisService.clearConversationCache(senderId, receiverId);
+      // await chatRedisService.clearConversationCache(senderId, receiverId);
       
       return updatedMessages;
     } catch (error) {

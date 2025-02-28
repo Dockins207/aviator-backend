@@ -62,7 +62,29 @@ ALTER TABLE game_sessions
 ADD CONSTRAINT chk_total_bet_amount_non_negative 
 CHECK (total_bet_amount >= 0);
 
--- Function to mark game session as completed
+-- Function to manage game session status transitions
+CREATE OR REPLACE FUNCTION manage_game_session_status() RETURNS TRIGGER AS $$
+BEGIN
+    -- Ensure we're using the correct enum type
+    NEW.status := NEW.status::game_status;
+
+    -- Simple status transition rules
+    IF NEW.status = 'in_progress'::game_status AND NEW.crash_point_history IS NOT NULL THEN
+        NEW.status := 'completed'::game_status;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger for game session status transitions
+DROP TRIGGER IF EXISTS game_session_status_transition ON game_sessions;
+CREATE TRIGGER game_session_status_transition 
+    BEFORE UPDATE ON game_sessions 
+    FOR EACH ROW 
+    EXECUTE FUNCTION manage_game_session_status();
+
+-- Function to mark game session as completed with simplified checks
 CREATE OR REPLACE FUNCTION mark_game_session_complete(
     p_game_session_id UUID,
     p_crash_point_entry JSONB DEFAULT NULL
@@ -70,10 +92,10 @@ CREATE OR REPLACE FUNCTION mark_game_session_complete(
 BEGIN
     UPDATE game_sessions 
     SET 
-        status = 'completed',
-        crash_point_history = p_crash_point_entry
+        status = 'completed'::game_status,
+        crash_point_history = COALESCE(p_crash_point_entry, crash_point_history)
     WHERE game_session_id = p_game_session_id 
-      AND status = 'in_progress';
+      AND status = 'in_progress'::game_status;
 END;
 $$ LANGUAGE plpgsql;
 

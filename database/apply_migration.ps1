@@ -1,11 +1,11 @@
 #!/usr/bin/env pwsh
 
-# PostgreSQL connection details from .env
-$env:PGPASSWORD = '2020'
+# PostgreSQL connection details
 $DB_HOST = '192.168.75.118'
 $DB_PORT = 5432
 $DB_NAME = 'aviator_db'
 $DB_USER = 'admin'
+$DB_PASSWORD = '2020'
 
 # Migration files in order
 $migrationFiles = @(
@@ -17,27 +17,40 @@ $migrationFiles = @(
 )
 
 # Function to apply a single migration
-function Apply-Migration($file) {
+function Apply-Migration {
+    param($file)
+
     $fullPath = Join-Path -Path $PSScriptRoot -ChildPath "migrations\$file"
     Write-Host "Applying migration: $file"
     
-    # Drop tables if they exist to avoid conflicts
-    $tableName = $file -replace '^\d+_create_(.+)_table\.sql$', '$1'
-    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "DROP TABLE IF EXISTS $tableName CASCADE;"
+    $env:PGPASSWORD = $DB_PASSWORD
     
-    # Apply migration
-    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f $fullPath
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to apply migration: $file"
-        exit 1
+    try {
+        $tableName = $file -replace '^\d+_create_(.+)_table\.sql$', '$1'
+        
+        # Drop table if exists
+        & psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "DROP TABLE IF EXISTS $tableName CASCADE;"
+        
+        # Apply migration
+        & psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f $fullPath
+        
+        if ($LASTEXITCODE -ne 0) {
+            throw "Migration failed: $file"
+        }
+        
+        Write-Host "Successfully applied migration: $file"
+    }
+    catch {
+        Write-Error "Error in migration $file`: $_"
+        throw
     }
 }
 
-# Apply migrations in order
+# Apply migrations
 foreach ($file in $migrationFiles) {
-    Apply-Migration $file
+    Apply-Migration -file $file
 }
 
-# Verify table creation
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "\dt"
+# Verify tables
+Write-Host "Verifying database tables..."
+& psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "\dt"

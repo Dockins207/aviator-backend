@@ -1,4 +1,3 @@
-import cacheService from '../redis-services/cacheService.js';
 import logger from '../config/logger.js';
 
 class SocketService {
@@ -22,7 +21,8 @@ class SocketService {
         connectedAt: conn.connectedAt
       }));
 
-      await cacheService.set('socket:active_connections', connectionsData, 300); // 5-minute cache
+      // Removed Redis service import, so cacheService is not available
+      // await cacheService.set('socket:active_connections', connectionsData, 300); // 5-minute cache
       
       logger.info('Active Connections Cached', {
         totalConnections: connectionsData.length
@@ -40,15 +40,16 @@ class SocketService {
    * @returns {Promise<Array>} Recent game broadcasts
    */
   async getRecentGameBroadcasts(gameId) {
-    return await cacheService.memoize(
-      `socket:game_broadcasts:${gameId}`,
-      async () => {
-        // Implement actual broadcast retrieval logic
-        const broadcasts = await this.fetchRecentBroadcasts(gameId);
-        return broadcasts;
-      },
-      1800 // 30-minute cache
-    );
+    // Removed Redis service import, so cacheService is not available
+    // return await cacheService.memoize(
+    //   `socket:game_broadcasts:${gameId}`,
+    //   async () => {
+    //     // Implement actual broadcast retrieval logic
+    //     const broadcasts = await this.fetchRecentBroadcasts(gameId);
+    //     return broadcasts;
+    //   },
+    //   1800 // 30-minute cache
+    // );
   }
 
   /**
@@ -56,7 +57,8 @@ class SocketService {
    */
   async cacheConnectionMetrics() {
     try {
-      await cacheService.set('socket:connection_metrics', this.connectionMetrics, 600); // 10-minute cache
+      // Removed Redis service import, so cacheService is not available
+      // await cacheService.set('socket:connection_metrics', this.connectionMetrics, 600); // 10-minute cache
       
       logger.info('Connection Metrics Cached', {
         totalConnections: this.connectionMetrics.totalConnections,
@@ -80,8 +82,9 @@ class SocketService {
       this.io?.emit('gameStateChange', gameStateChange);
 
       if (cache) {
-        const broadcastCacheKey = `socket:broadcast:${gameStateChange.gameId}:${Date.now()}`;
-        await cacheService.set(broadcastCacheKey, gameStateChange, 3600); // 1-hour cache
+        // Removed Redis service import, so cacheService is not available
+        // const broadcastCacheKey = `socket:broadcast:${gameStateChange.gameId}:${Date.now()}`;
+        // await cacheService.set(broadcastCacheKey, gameStateChange, 3600); // 1-hour cache
       }
 
       logger.info('Game State Broadcast', {

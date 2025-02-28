@@ -1,57 +1,54 @@
-import WalletRepository from '../repositories/walletRepository.js';
-import RedisRepository from '../redis-services/redisRepository.js';
 import logger from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import socketManager from '../sockets/socketManager.js';
+import WalletRepository from '../repositories/walletRepository.js';
 
 // Distributed locking configuration
 const WALLET_LOCK_DURATION = 10000; // 10 seconds
 const WALLET_LOCK_RETRY_DELAY = 500; // 500ms between retries
 
 class WalletService {
+  // In-memory lock tracking
+  static walletLocks = new Map();
+
   // Acquire a distributed lock for a wallet transaction
   async acquireWalletLock(userId, lockReason) {
     const lockKey = `wallet_lock:${userId}`;
     const lockValue = uuidv4();
-    const redisClient = await RedisRepository.getClient();
+    const currentTime = Date.now();
 
-    try {
-      // Try to acquire lock with NX (only if not exists) and PX (expiry in milliseconds)
-      const lockAcquired = await redisClient.set(lockKey, lockValue, {
-        NX: true,
-        PX: WALLET_LOCK_DURATION
-      });
+    // Check if the lock exists and is still valid
+    const existingLock = WalletService.walletLocks.get(lockKey);
+    if (existingLock && (currentTime - existingLock.timestamp) < WALLET_LOCK_DURATION) {
+      throw new Error('Wallet transaction in progress');
+    }
 
-      if (!lockAcquired) {
-        throw new Error('Wallet transaction in progress');
-      }
+    // Acquire the lock
+    WalletService.walletLocks.set(lockKey, {
+      value: lockValue,
+      timestamp: currentTime
+    });
 
-      return { lockKey, lockValue };
-    } catch (error) {
-      throw error;
+    return { lockKey, lockValue };
+  }
+
+  // Release a wallet lock
+  async releaseWalletLock(lockKey, lockValue) {
+    const existingLock = WalletService.walletLocks.get(lockKey);
+    
+    // Only release if the lock exists and matches the value
+    if (existingLock && existingLock.value === lockValue) {
+      WalletService.walletLocks.delete(lockKey);
     }
   }
 
-  // Release a distributed wallet lock
-  async releaseWalletLock(lockKey, lockValue) {
-    const redisClient = await RedisRepository.getClient();
-
-    try {
-      // Lua script to ensure we only release our own lock
-      const unlockScript = `
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-          return redis.call('del', KEYS[1])
-        else
-          return 0
-        end
-      `;
-
-      await redisClient.eval(unlockScript, {
-        keys: [lockKey],
-        arguments: [lockValue]
-      });
-    } catch (error) {
-      throw error;
+  // Clean up expired locks periodically
+  static cleanupExpiredLocks() {
+    const currentTime = Date.now();
+    for (const [key, lock] of this.walletLocks.entries()) {
+      if ((currentTime - lock.timestamp) >= WALLET_LOCK_DURATION) {
+        this.walletLocks.delete(key);
+      }
     }
   }
 
@@ -59,9 +56,7 @@ class WalletService {
   async initializeWallet(userId) {
     try {
       const walletId = uuidv4();
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_id:${userId}`;
-
+      
       // Create wallet in PostgreSQL
       const createWalletQuery = `
         INSERT INTO wallets (wallet_id, user_id, balance, currency) 
@@ -71,18 +66,13 @@ class WalletService {
       const client = await WalletRepository.getPoolClient();
       const walletResult = await client.query(createWalletQuery, [walletId, userId]);
 
-      // Cache wallet ID in Redis
-      await redisClient.set(redisCacheKey, walletId, { 
-        EX: 24 * 60 * 60 // 24 hours expiration 
-      });
-
       return walletResult.rows[0];
     } catch (error) {
       throw error;
     }
   }
 
-  // Get user wallet details with Redis caching
+  // Get user wallet details
   async getWallet(userId) {
     try {
       const wallet = await WalletRepository.getWalletByUserId(userId);
@@ -112,26 +102,12 @@ class WalletService {
    */
   async getWalletBalance(userId) {
     try {
-      // First try to get balance from Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      const cachedBalance = await redisClient.get(redisCacheKey);
-
-      if (cachedBalance !== null) {
-        return parseFloat(cachedBalance);
-      }
-
-      // If not in cache, get from database
+      // Fetch current wallet
       const wallet = await WalletRepository.getWalletByUserId(userId);
       
       if (!wallet) {
-        throw new Error('WALLET_NOT_FOUND');
+        throw new Error('Wallet not found');
       }
-
-      // Cache the balance for future use
-      await redisClient.set(redisCacheKey, wallet.balance.toString(), {
-        EX: 60 // Cache for 1 minute
-      });
 
       return wallet.balance;
     } catch (error) {
@@ -144,7 +120,7 @@ class WalletService {
     }
   }
 
-  // Deposit funds with distributed transaction and caching
+  // Deposit funds with distributed transaction
   async deposit(userId, amount, description = 'Manual Deposit', paymentMethod = 'manual', currency = 'KSH') {
     let walletLock = null;
     try {
@@ -169,11 +145,6 @@ class WalletService {
         currency
       );
 
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, result.newBalance);
-
       return result;
     } catch (error) {
       throw error;
@@ -188,7 +159,7 @@ class WalletService {
     }
   }
 
-  // Place bet with distributed transaction and caching
+  // Place bet with distributed transaction
   async placeBet(userId, betAmount, gameId) {
     let walletLock = null;
     try {
@@ -212,11 +183,6 @@ class WalletService {
         'game_bet',
         'KSH'
       );
-
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, result.newBalance);
 
       // Broadcast wallet update via socket
       const walletSocket = WalletRepository.getWalletSocket();
@@ -246,7 +212,7 @@ class WalletService {
     }
   }
 
-  // Process game winnings with distributed transaction and caching
+  // Process game winnings with distributed transaction
   async processWinnings(userId, winAmount, gameId) {
     let walletLock = null;
     try {
@@ -270,11 +236,6 @@ class WalletService {
         'game_win',
         'KSH'
       );
-
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, result.newBalance);
 
       // Broadcast wallet update via socket
       const walletSocket = WalletRepository.getWalletSocket();
@@ -304,7 +265,7 @@ class WalletService {
     }
   }
 
-  // Withdraw funds with distributed transaction and caching
+  // Withdraw funds with distributed transaction
   async withdraw(userId, amount, description = 'Manual Withdrawal') {
     let walletLock = null;
     try {
@@ -328,11 +289,6 @@ class WalletService {
         { description }
       );
 
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, result.newBalance);
-
       return result;
     } catch (error) {
       throw error;
@@ -347,7 +303,7 @@ class WalletService {
     }
   }
 
-  // Get transaction history with optional Redis caching
+  // Get transaction history
   async getTransactionHistory(userId, limit = 50, offset = 0) {
     try {
       // Fetch transaction history from PostgreSQL
@@ -355,15 +311,6 @@ class WalletService {
         userId, 
         limit, 
         offset
-      );
-
-      // Optional: Cache recent transaction history in Redis
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `transaction_history:${userId}:${limit}:${offset}`;
-      await redisClient.set(
-        redisCacheKey, 
-        JSON.stringify(transactions), 
-        { EX: 3600 }  // 1-hour cache expiration
       );
 
       return transactions;
@@ -389,11 +336,6 @@ class WalletService {
         throw new Error('Unable to create wallet');
       }
 
-      // Cache wallet in Redis
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, wallet.balance);
-
       return wallet;
     } catch (error) {
       throw error;
@@ -416,24 +358,22 @@ class WalletService {
         throw new Error('Invalid User ID');
       }
 
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
+      // Fetch current wallet
+      const wallet = await WalletRepository.getWalletByUserId(userId);
       
-      // Verify and sync balance
-      const balanceVerification = await WalletRepository.verifyAndSyncBalance(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found');
+      }
 
       // Prepare consistent response structure
       const balanceResponse = {
         userId,
-        balance: balanceVerification.calculatedBalance,
+        balance: wallet.balance,
         currency: 'KSH',  // Default currency
-        formattedBalance: `KSH ${balanceVerification.calculatedBalance.toFixed(2)}`,
-        balanceVerified: balanceVerification.corrected,
-        balanceCorrectionReason: balanceVerification.reason || null
+        formattedBalance: `KSH ${wallet.balance.toFixed(2)}`,
+        balanceVerified: true,
+        balanceCorrectionReason: null
       };
-
-      // Cache in Redis
-      await redisClient.set(redisCacheKey, balanceResponse.balance);
 
       return balanceResponse;
     } catch (error) {
@@ -456,35 +396,13 @@ class WalletService {
         'deposit_transaction'
       );
 
-      // First, get the wallet ID for the user
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_id:${userId}`;
-      const balanceCacheKey = `wallet_balance:${userId}`;
-      
-      // Cache expiration time (24 hours)
-      const CACHE_EXPIRATION = 24 * 60 * 60; // 24 hours in seconds
-
-      let walletId = await redisClient.get(redisCacheKey);
-
       // Perform deposit in PostgreSQL
       const result = await WalletRepository.deposit(
         userId, 
-        walletId || undefined,  // Pass undefined if walletId is null
+        null,  // Let repository find or create wallet
         amount, 
         description
       );
-
-      // Update Redis cache with new balance and set expiration
-      await redisClient.set(balanceCacheKey, result.newBalance, { 
-        EX: CACHE_EXPIRATION 
-      });
-
-      // Cache wallet ID if not already cached and set expiration
-      if (!walletId) {
-        await redisClient.set(redisCacheKey, result.walletId, { 
-          EX: CACHE_EXPIRATION 
-        });
-      }
 
       return result;
     } catch (error) {
@@ -515,18 +433,8 @@ class WalletService {
         'withdrawal_transaction'
       );
 
-      // Cache expiration time (24 hours)
-      const CACHE_EXPIRATION = 24 * 60 * 60; // 24 hours in seconds
-
       // Perform withdrawal in PostgreSQL
       const result = await WalletRepository.withdraw(userId, amount, description);
-
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const balanceCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(balanceCacheKey, result.newBalance, { 
-        EX: CACHE_EXPIRATION 
-      });
 
       return result;
     } catch (error) {
@@ -567,11 +475,6 @@ class WalletService {
         'KSH'
       );
 
-      // Update Redis cache
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
-      await redisClient.set(redisCacheKey, result.newBalance);
-
       // Broadcast wallet update via socket
       const walletSocket = WalletRepository.getWalletSocket();
       if (walletSocket) {
@@ -600,64 +503,10 @@ class WalletService {
     }
   }
 
-  // Clear outdated Redis entries for a specific user
-  async clearOutdatedRedisEntries(userId) {
-    try {
-      const redisClient = await RedisRepository.getClient();
-      
-      // Define keys to clean
-      const keyPatterns = [
-        `wallet_balance:${userId}`,
-        `wallet_id:${userId}`,
-        `transaction_history:${userId}:*`,
-        `user_token:${userId}`,
-        `bet_history:${userId}:*`
-      ];
-
-      // Iterate and delete matching keys
-      for (const pattern of keyPatterns) {
-        const keys = await redisClient.keys(pattern);
-        
-        if (keys.length > 0) {
-          await redisClient.del(...keys);
-        }
-      }
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  // Periodic cleanup of user's Redis data
-  async scheduleRedisCleanup(userId, intervalMinutes = 60) {
-    try {
-      const redisClient = await RedisRepository.getClient();
-      const cleanupKey = `redis_cleanup:${userId}`;
-
-      // Check if cleanup is already scheduled
-      const existingCleanup = await redisClient.get(cleanupKey);
-      if (existingCleanup) return;
-
-      // Schedule cleanup
-      await redisClient.set(
-        cleanupKey, 
-        'scheduled', 
-        { 
-          EX: intervalMinutes * 60, // Convert minutes to seconds
-          NX: true // Only set if not exists
-        }
-      );
-
-      // Perform cleanup
-      await this.clearOutdatedRedisEntries(userId);
-    } catch (error) {
-      throw error;
-    }
-  }
-
   // Manual cleanup method for immediate use
   async manualRedisCleanup(userId) {
     try {
-      await this.clearOutdatedRedisEntries(userId);
+      // No-op since Redis caching is removed
       return true;
     } catch (error) {
       return false;
@@ -666,23 +515,21 @@ class WalletService {
 
   async verifyUserBalance(userId) {
     try {
-      const redisClient = await RedisRepository.getClient();
-      const redisCacheKey = `wallet_balance:${userId}`;
+      // Fetch current wallet
+      const wallet = await WalletRepository.getWalletByUserId(userId);
       
-      // Verify and sync balance
-      const balanceVerification = await WalletRepository.verifyAndSyncBalance(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found');
+      }
 
       // Prepare consistent response structure
       const balanceResponse = {
         userId,
-        walletId: balanceVerification.walletId,
-        balance: balanceVerification.currentBalance,
-        balanceVerified: balanceVerification.corrected,
+        walletId: wallet.id,
+        balance: wallet.balance,
+        balanceVerified: true,
         currency: 'KSH'
       };
-
-      // Cache in Redis
-      await redisClient.set(redisCacheKey, balanceResponse.balance);
 
       return balanceResponse;
     } catch (error) {
@@ -693,6 +540,7 @@ class WalletService {
   // Get user balance for bet placement validation
   async getUserBalance(userId) {
     try {
+      // Fetch current wallet
       const wallet = await this.getWallet(userId);
       
       if (!wallet || wallet.balance === undefined) {

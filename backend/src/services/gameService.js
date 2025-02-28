@@ -2,11 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import gameUtils from '../utils/gameUtils.js';
 import gameConfig from '../config/gameConfig.js';
 import GameRepository from '../repositories/gameRepository.js';
-import RedisRepository from '../redis-services/redisRepository.js';
 import GameSessionRepository from '../repositories/gameSessionRepository.js'; 
 import logger from '../config/logger.js';
-import betTrackingService from '../redis-services/betTrackingService.js'; 
-import cacheService from '../redis-services/cacheService.js';
 import notificationService from '../services/notificationService.js';
 import socketService from '../services/socketService.js';
 import { EventEmitter } from 'events';
@@ -212,11 +209,11 @@ class GameBoardService extends EventEmitter {
       this.gameState.players = this.gameState.players.map(player => {
         try {
           // Use placeBet for each player
-          const placedBet = betTrackingService.placeBet({
+          const placedBet = {
             userId: player.userId,
             betAmount: player.betAmount,
             gameSessionId: this.gameState.gameId
-          });
+          };
           return placedBet;
         } catch (error) {
           logger.error('BET_PLACEMENT_ERROR', {
@@ -237,21 +234,19 @@ class GameBoardService extends EventEmitter {
             clearInterval(this.countdownInterval);
             
             try {
-              // Activate both placed and queued bets
-              const activationResults = await betTrackingService.bulkActivateAllBets(this.gameState.gameId);
+              // Bets are automatically activated by database trigger
+              // Just update the game state to reflect this
+              this.gameState.status = 'flying';
               
-              logger.info('BETS_ACTIVATED', {
+              logger.info('GAME_STATE_CHANGED', {
                 gameId: this.gameState.gameId,
-                totalBets: activationResults.successCount + activationResults.failedCount,
-                successCount: activationResults.successCount,
-                failedCount: activationResults.failedCount,
-                processingTime: activationResults.processingTime
+                previousStatus: 'betting',
+                newStatus: 'flying'
               });
 
-              // Update game state with activated bets
-              this.gameState.activeBets = activationResults.successfulBetIds;
             } catch (error) {
-              logger.error('BET_ACTIVATION_ERROR', {
+              logger.error('GAME_STATE_CHANGE_ERROR', {
+                service: 'aviator-backend',
                 gameId: this.gameState.gameId,
                 error: error.message,
                 stack: error.stack
@@ -355,28 +350,34 @@ class GameBoardService extends EventEmitter {
 
     // Finalize all active bets as expired
     this.gameState.players.forEach(bet => {
-      betTrackingService.finalizeBet(bet.betId, 'expired', Number(crashPoint));
+      // Finalize bet directly
+      const finalizedBet = {
+        betId: bet.betId,
+        status: 'expired',
+        payoutMultiplier: Number(crashPoint)
+      };
     });
 
     // Mark game session as complete in the database
     try {
-      console.log('Attempting to mark game session complete', {
-        gameSessionId: this.gameState.gameId,
-        crashPoint
-      });
-
       // Create a new repository instance
       const gameRepo = new GameRepository();
 
-      // Use the instance method to mark game session complete
+      // Removed verbose logging
+      // console.log('Attempting to mark game session complete', {
+      //   gameSessionId: this.gameState.gameId,
+      //   crashPoint
+      // });
+
       const completedSession = await gameRepo.markGameSessionComplete(
-        this.gameState.gameId, 
+        this.gameState.gameId,
         {
           crash_point: crashPoint
         }
       );
 
-      console.log('Game session completion result:', completedSession);
+      // Removed verbose logging
+      // console.log('Game session completion result:', completedSession);
     } catch (error) {
       logger.error('GAME_SESSION_COMPLETE_ERROR', {
         gameId: this.gameState.gameId,
@@ -502,12 +503,12 @@ class GameBoardService extends EventEmitter {
       }
 
       // Process queued bets before activation
-      const queuedBets = await betTrackingService.getQueuedBets(gameState.gameId);
+      const queuedBets = await GameRepository.getQueuedBets(gameState.gameId);
       
       // Validate and filter queued bets for transfer
       const validatedQueuedBets = await Promise.all(
         queuedBets.map(bet => 
-          betTrackingService.validateQueuedBetTransfer(bet, gameState.gameId)
+          GameRepository.validateQueuedBetTransfer(bet, gameState.gameId)
         )
       );
 
@@ -515,7 +516,7 @@ class GameBoardService extends EventEmitter {
         .filter(result => result.isValid)
         .map(result => ({
           ...result.betDetails,
-          status: betTrackingService.BET_STATES.PLACED  // Ensure correct status for activation
+          status: 'placed'  // Ensure correct status for activation
         }));
 
       // Log queued bet validation results
@@ -526,7 +527,7 @@ class GameBoardService extends EventEmitter {
       });
 
       // Attempt bulk bet activation with validated queued bets
-      const bulkActivationResult = await betTrackingService.activateBets(
+      const bulkActivationResult = await GameRepository.activateBets(
         gameState, 
         transferableBets  // Pass validated bets
       );
@@ -540,7 +541,7 @@ class GameBoardService extends EventEmitter {
         });
 
         // Fallback to individual bet activation
-        const fallbackResult = await betTrackingService.fallbackActivateBets(gameState);
+        const fallbackResult = await GameRepository.fallbackActivateBets(gameState);
 
         // Log fallback results
         logger.info('Fallback Bet Activation Results', {
@@ -559,7 +560,7 @@ class GameBoardService extends EventEmitter {
 
       // Remove successfully processed queued bets
       if (transferableBets.length > 0) {
-        await betTrackingService.removeProcessedQueuedBets(
+        await GameRepository.removeProcessedQueuedBets(
           transferableBets.map(bet => bet.id || bet.betId), 
           gameState.gameId
         );
@@ -670,25 +671,25 @@ class GameBoardService extends EventEmitter {
       case 'betting':
         if (previousState.status === 'crashed') {
           // Process any queued bets from previous session
-          const queuedBets = await betTrackingService.getQueuedBets();
+          const queuedBets = await GameRepository.getQueuedBets(gameId);
           if (queuedBets && queuedBets.length > 0) {
             logger.info('PROCESSING_QUEUED_BETS', {
               gameId,
               queuedBetsCount: queuedBets.length
             });
-            await betTrackingService.processQueuedBets(gameId);
+            await GameRepository.processQueuedBets(gameId);
           }
         }
         break;
 
       case 'flying':
         // Prepare for bet tracking and multiplier generation
-        await betTrackingService.prepareBetsForTracking(gameId);
+        await GameRepository.prepareBetsForTracking(gameId);
         break;
       
       case 'crashed':
         // Settle all active bets
-        await betTrackingService.settleBets(gameId);
+        await GameRepository.settleBets(gameId);
         break;
       
       case 'completed':

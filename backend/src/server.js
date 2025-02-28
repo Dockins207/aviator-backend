@@ -5,7 +5,6 @@ import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import os from 'os';
 import logger from './config/logger.js';
-import redisConnection from './config/redisConfig.js';
 import { pool, connectWithRetry } from './config/database.js';
 import { WalletRepository } from './repositories/walletRepository.js';
 import gameService from './services/gameService.js';
@@ -18,7 +17,6 @@ import betRoutes from './routes/betRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
 import schedule from 'node-schedule';
 import { authService } from './services/authService.js';
-import redisRepository from './redis-services/redisRepository.js';
 import socketManager from './sockets/socketManager.js';
 
 // Load environment variables
@@ -32,10 +30,14 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000' || 'htt
 // Improved CORS configuration
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
-  'http://192.168.0.11:3000', 
+  'http://192.168.0.11:3000',
+  'http://192.168.0.11:8001',
   'https://localhost:3000',
   'http://127.0.0.1:3000',
-  'https://avbetting.netlify.app'
+  'https://avbetting.netlify.app',
+  'capacitor://localhost',
+  'http://localhost',
+  'http://192.168.0.11'
 ];
 
 const corsOptions = {
@@ -43,9 +45,10 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    const isAllowed = ALLOWED_ORIGINS.includes(origin);
-
-    if (isAllowed) {
+    // Check if the origin's hostname matches our local network pattern
+    const isLocalNetwork = /^http:\/\/192\.168\.\d+\.\d+(?::\d+)?$/.test(origin);
+    
+    if (isLocalNetwork || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
       console.warn(`CORS blocked for origin: ${origin}`);
@@ -74,6 +77,7 @@ app.use(cors(corsOptions));
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Add error handling middleware before routes
 app.use((err, req, res, next) => {
@@ -127,41 +131,6 @@ async function startServer() {
 
     console.log('Database connection established');
 
-    // Setup game session validator for Redis repository
-    redisRepository.setGameSessionValidator(async (providedSessionId) => {
-      try {
-        // Use gameService to validate the session ID
-        const currentGameState = gameService.gameState || {};
-        
-        // Check if the provided session ID matches the current game session ID
-        if (!currentGameState || !currentGameState.gameId) {
-          logger.warn('GAME_SESSION_STATE_UNAVAILABLE', {
-            message: 'Current game state not found',
-            providedSessionId
-          });
-          return false;
-        }
-
-        const isValid = providedSessionId === currentGameState.gameId;
-
-        if (!isValid) {
-          logger.warn('SESSION_ID_MISMATCH', {
-            providedSessionId,
-            currentGameSessionId: currentGameState.gameId,
-            context: 'server_initialization'
-          });
-        }
-
-        return isValid;
-      } catch (error) {
-        logger.error('GAME_SESSION_VALIDATOR_ERROR', {
-          errorMessage: error.message,
-          providedSessionId
-        });
-        return false;
-      }
-    });
-
     // Create HTTP server
     const server = createServer(app);
 
@@ -173,8 +142,8 @@ async function startServer() {
         credentials: true,
         allowedHeaders: ["Content-Type", "Authorization"]
       },
-      pingTimeout: 60000,
-      pingInterval: 25000,
+      pingTimeout: 120000,        // Increase ping timeout to 2 minutes
+      pingInterval: 30000,        // Increase ping interval to 30 seconds
       maxHttpBufferSize: 1e6,
       connectionStateRecovery: {
         maxDisconnectionDuration: 2 * 60 * 1000,
@@ -186,61 +155,34 @@ async function startServer() {
     socketManager.initialize(io);
 
     // Import socket and game modules dynamically
-    Promise.all([
+    const [
+      { default: GameSocketClass }, 
+      { default: ChatSocketInitializer }, 
+      { default: BetSocketClass },
+      { default: WalletSocketClass }
+    ] = await Promise.all([
       import('./sockets/gameSocket.js'),
       import('./sockets/chatSocket.js'),
       import('./sockets/betSocket.js'),
       import('./sockets/walletSocket.js')
-    ]).then(async ([
-      { default: GameSocketClass }, 
-      { default: ChatSocketInitializer }, 
-      { default: BetSocketInitializer },
-      { default: WalletSocketClass }
-    ]) => {
-      // Initialize socket namespaces with class-based modules
-      const gameSocket = new GameSocketClass(io);
-      ChatSocketInitializer(io);
-      
-      // Explicitly set Socket.IO for notification service
-      notificationService.setSocketIO(io);
-      
-      // Initialize wallet socket
-      const walletSocket = new WalletSocketClass(io);
-      
-      // Set wallet socket for repository
-      WalletRepository.setWalletSocket(walletSocket);
-      
-      // Handle different socket initialization patterns
-      if (typeof BetSocketInitializer === 'function') {
-        BetSocketInitializer(io);
-      } else if (typeof BetSocketInitializer === 'object' && BetSocketInitializer.default) {
-        const betSocket = new BetSocketInitializer.default(io);
-        betSocket.initialize();
-      }
+    ]);
 
-      // Start the server
-      server.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-        console.log(`Environment: ${NODE_ENV}`);
-        
-        // Log network interfaces
-        const networkInfo = getNetworkInterfaces();
-        if (networkInfo) {
-          console.log('Network Interfaces:');
-          networkInfo.forEach(info => {
-            console.log(`  ${info.name}: ${info.address}`);
-          });
-        }
-      });
-
-      // Optional: If you need to start any specific methods after initialization
-      if (typeof gameSocket.startGameCycle === 'function') {
-        gameSocket.startGameCycle();
-      }
-    }).catch(error => {
-      console.error('Failed to initialize socket modules:', error);
-      process.exit(1);
-    });
+    // Initialize socket namespaces with class-based modules
+    const gameSocket = new GameSocketClass(io);
+    ChatSocketInitializer(io);
+    
+    // Explicitly set Socket.IO for notification service
+    notificationService.setSocketIO(io);
+    
+    // Initialize wallet socket
+    const walletSocket = new WalletSocketClass(io);
+    
+    // Set wallet socket for repository
+    WalletRepository.setWalletSocket(walletSocket);
+    
+    // Handle different socket initialization patterns
+    const betSocket = new BetSocketClass(io);
+    betSocket.initialize();
 
     // Comprehensive Health Check Route
     app.get('/api/health', (req, res) => {
@@ -328,12 +270,31 @@ async function startServer() {
       });
     });
 
+    // Start the server
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${NODE_ENV}`);
+      
+      // Log network interfaces
+      const networkInfo = getNetworkInterfaces();
+      if (networkInfo) {
+        console.log('Network Interfaces:');
+        networkInfo.forEach(info => {
+          console.log(`  ${info.name}: ${info.address}`);
+        });
+      }
+    });
+
+    // Optional: If you need to start any specific methods after initialization
+    if (typeof gameSocket.startGameCycle === 'function') {
+      gameSocket.startGameCycle();
+    }
+
     // Graceful shutdown
     process.on('SIGINT', async () => {
       try {
-        await redisConnection.disconnect();
         server.close(() => {
-          logger.info('Server and Redis connection closed');
+          logger.info('Server closed');
           process.exit(0);
         });
       } catch (error) {
@@ -343,17 +304,13 @@ async function startServer() {
     });
 
   } catch (error) {
-    logger.error('Failed to start server', error);
+    console.error('Error starting server:', error);
     process.exit(1);
   }
 }
 
-// Register routes
-app.use('/auth', authRoutes);
-app.use('/game', gameRoutes);
-app.use('/wallet', walletRoutes);
-app.use('/bet', betRoutes);
-app.use('/payment', paymentRoutes);
+// Start the server
+startServer();
 
 // Global error handling
 process.on('uncaughtException', (error) => {
@@ -378,6 +335,3 @@ process.on('unhandledRejection', (reason, promise) => {
   });
   process.exit(1);
 });
-
-// Start the server
-startServer();
