@@ -9,10 +9,8 @@ export default class PlayerBetRepository {
   static async placeBet({
     userId, 
     betAmount, 
-    gameSessionId = null, 
     cashoutMultiplier = null, 
     autocashoutMultiplier = null,
-    status = 'pending',
     payoutAmount = null,
     betType = 'standard'
   }) {
@@ -37,33 +35,33 @@ export default class PlayerBetRepository {
         [betAmount, userId]
       );
 
-      // Insert bet record
+      // Insert bet record - always set game_session_id to null to allow activation
       const betResult = await client.query(
         `INSERT INTO player_bets 
-        (user_id, bet_amount, game_session_id, cashout_multiplier, 
-         autocashout_multiplier, status, payout_amount, bet_type) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-        RETURNING bet_id`,
+        (user_id, bet_amount, cashout_multiplier, 
+         autocashout_multiplier, payout_amount, bet_type) 
+        VALUES ($1, $2, $3, $4, $5, $6) 
+        RETURNING bet_id, game_session_id`,
         [
           userId, 
           betAmount, 
-          gameSessionId, 
           cashoutMultiplier, 
           autocashoutMultiplier, 
-          status, 
           payoutAmount,
           betType
         ]
       );
 
       const betId = betResult.rows[0].bet_id;
+      const gameSessionId = betResult.rows[0].game_session_id;
 
       await client.query('COMMIT');
 
       return {
         bet_id: betId,
+        game_session_id: gameSessionId,
         bet_amount: betAmount,
-        status: status
+        status: 'pending'
       };
 
     } catch (error) {
@@ -85,66 +83,140 @@ export default class PlayerBetRepository {
     return 0;
   }
 
-  static async cashoutBet({ betId, userId, currentMultiplier }) {
+  /**
+   * Process a bet cashout
+   * @param {Object} options - Cashout options
+   * @param {string} options.betId - Bet ID
+   * @param {string} options.userId - User ID
+   * @param {number} options.currentMultiplier - Cashout multiplier
+   * @returns {Promise<Object>} - Cashout result
+   */
+  static async cashoutBet({ 
+    betId, 
+    userId, 
+    currentMultiplier 
+  }) {
+    // First, attempt to retrieve bet from Redis
+    let bet;
+    try {
+      bet = await RedisService.getBet(betId);
+      
+      // Validate Redis bet
+      if (bet && bet.userId !== userId) {
+        logger.warn('REDIS_BET_USER_MISMATCH', {
+          betId,
+          requestedUserId: userId,
+          actualUserId: bet.userId
+        });
+        bet = null;
+      }
+    } catch (redisError) {
+      logger.warn('REDIS_BET_RETRIEVAL_ERROR', {
+        betId,
+        error: redisError.message
+      });
+      bet = null;
+    }
+
+    // If Redis fails, fallback to database
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
 
-      // Get bet details with row lock
-      const betQuery = `
-        SELECT * FROM player_bets 
-        WHERE bet_id = $1 AND user_id = $2 AND status = 'active'
-        FOR UPDATE
-      `;
-      const betResult = await client.query(betQuery, [betId, userId]);
+      // If no bet in Redis, fetch from database
+      if (!bet) {
+        const betQuery = `
+          SELECT 
+            bet_id, 
+            user_id, 
+            bet_amount, 
+            game_session_id,
+            status
+          FROM player_bets 
+          WHERE bet_id = $1 AND user_id = $2 
+          FOR UPDATE
+        `;
+        const betResult = await client.query(betQuery, [betId, userId]);
 
-      if (betResult.rows.length === 0) {
-        throw new Error('Bet not found or not active');
+        if (betResult.rows.length === 0) {
+          throw new Error('Bet not found or does not belong to user');
+        }
+
+        bet = betResult.rows[0];
+      }
+      
+      // Validate bet status and multiplier
+      if (bet.status !== 'active') {
+        throw new Error('Bet is not active and cannot be cashed out');
+      }
+      
+      if (currentMultiplier <= 1) {
+        throw new Error('Cashout multiplier must be greater than 1');
       }
 
-      const bet = betResult.rows[0];
+      // Calculate payout with precision handling
       const payoutAmount = parseFloat((bet.bet_amount * currentMultiplier).toFixed(2));
 
-      // Update bet with cashout details - only multiplier and payout
+      // Update bet with cashout details
       const updateQuery = `
         UPDATE player_bets 
         SET 
-          cashout_multiplier = $1,
+          cashout_multiplier = JSON_BUILD_OBJECT('timestamp', NOW(), 'multiplier', $1), 
           payout_amount = $2
-        WHERE bet_id = $3 AND status = 'active'
+        WHERE bet_id = $3
         RETURNING *
       `;
-
+      
       const updateResult = await client.query(updateQuery, [
-        currentMultiplier,
+        currentMultiplier, 
         payoutAmount,
         betId
       ]);
 
-      if (updateResult.rows.length === 0) {
-        throw new Error('Failed to update bet');
-      }
-
-      // Update user's wallet
+      // Update user's wallet balance
       const walletUpdate = await WalletRepository.updateBalance(
-        client,
-        userId,
-        payoutAmount,
-        'credit',
-        'Game win payout',
-        betId
+        client, 
+        userId, 
+        payoutAmount, 
+        'credit', 
+        'Game cashout'
       );
+
+      // Remove from active bets in Redis if present
+      const gameSessionId = bet.game_session_id;
+      if (gameSessionId) {
+        try {
+          // Remove the bet from Redis active bets
+          await RedisService.del(`active_bets:${gameSessionId}:${betId}`);
+          
+          logger.info('CASHOUT_REDIS_CLEANUP', {
+            service: 'aviator-backend',
+            betId,
+            userId,
+            gameSessionId,
+            timestamp: new Date().toISOString()
+          });
+        } catch (redisError) {
+          logger.warn('REDIS_ACTIVE_BETS_REMOVE_ERROR', {
+            service: 'aviator-backend',
+            betId,
+            userId,
+            gameSessionId,
+            error: redisError.message
+          });
+        }
+      }
 
       await client.query('COMMIT');
 
-      logger.info('BET_CASHOUT_SUCCESS', {
+      logger.info('CASHOUT_SUCCESS', {
+        service: 'aviator-backend',
         betId,
         userId,
-        originalBetAmount: bet.bet_amount,
-        cashoutMultiplier: currentMultiplier,
         payoutAmount,
-        newWalletBalance: walletUpdate.newBalance,
+        multiplier: currentMultiplier,
+        newBalance: walletUpdate.newBalance,
         timestamp: new Date().toISOString()
       });
 
@@ -154,15 +226,14 @@ export default class PlayerBetRepository {
         multiplier: currentMultiplier,
         newBalance: walletUpdate.newBalance
       };
-
     } catch (error) {
       await client.query('ROLLBACK');
       
-      logger.error('BET_CASHOUT_ERROR', {
+      logger.error('CASHOUT_ERROR', {
+        service: 'aviator-backend',
         betId,
         userId,
         error: error.message,
-        errorStack: error.stack,
         timestamp: new Date().toISOString()
       });
       
@@ -180,18 +251,18 @@ export default class PlayerBetRepository {
       
       const payoutAmount = parseFloat((bet.bet_amount * currentMultiplier).toFixed(2));
 
-      // Update bet with cashout details - only multiplier and payout
+      // Update bet with cashout details
       const updateQuery = `
         UPDATE player_bets 
         SET 
-          cashout_multiplier = $1,
+          cashout_multiplier = JSON_BUILD_OBJECT('timestamp', NOW(), 'multiplier', $1), 
           payout_amount = $2
-        WHERE bet_id = $3 AND status = 'active'
+        WHERE bet_id = $3
         RETURNING *
       `;
-
+      
       const updateResult = await client.query(updateQuery, [
-        currentMultiplier,
+        currentMultiplier, 
         payoutAmount,
         bet.bet_id
       ]);
@@ -209,6 +280,32 @@ export default class PlayerBetRepository {
         'Game win payout',
         bet.bet_id
       );
+
+      // Remove from active bets in Redis if present
+      const gameSessionId = bet.game_session_id;
+      if (gameSessionId) {
+        try {
+          // Simply remove the bet from Redis without re-caching
+          await RedisService.del(`active_bets:${gameSessionId}`);
+          
+          logger.info('CASHOUT_REDIS_CLEANUP', {
+            service: 'aviator-backend',
+            betId: bet.bet_id,
+            userId: bet.user_id,
+            gameSessionId,
+            timestamp: new Date().toISOString()
+          });
+        } catch (redisError) {
+          // Log but don't fail the transaction if Redis update fails
+          logger.warn('REDIS_ACTIVE_BETS_REMOVE_ERROR', {
+            service: 'aviator-backend',
+            betId: bet.bet_id,
+            userId: bet.user_id,
+            gameSessionId,
+            error: redisError.message
+          });
+        }
+      }
 
       await client.query('COMMIT');
 
@@ -256,7 +353,6 @@ export default class PlayerBetRepository {
       const query = `
         UPDATE player_bets 
         SET 
-          status = 'active', 
           game_session_id = $2
         WHERE bet_id = $1 
         RETURNING *
@@ -265,8 +361,6 @@ export default class PlayerBetRepository {
       const result = await pool.query(query, values);
       
       if (result.rows.length > 0) {
-        // Cache activated bet in Redis
-        await RedisService.cacheActiveBets(gameSessionId, [result.rows[0]]);
         return result.rows[0].bet_id;
       }
 
@@ -306,9 +400,74 @@ export default class PlayerBetRepository {
         throw new Error(`Bet not found: ${betId}`);
       }
 
+      // Remove from active bets in Redis if present
+      const bet = result.rows[0];
+      const gameSessionId = await PlayerBetRepository.findBetById(betId).then(bet => bet.game_session_id);
+      if (gameSessionId) {
+        try {
+          // Simply remove the bet from Redis without re-caching
+          await RedisService.del(`active_bets:${gameSessionId}`);
+        } catch (redisError) {
+          // Log but don't fail the transaction if Redis update fails
+          logger.warn('REDIS_ACTIVE_BETS_REMOVE_ERROR', {
+            service: 'aviator-backend',
+            betId,
+            userId: bet.user_id,
+            gameSessionId,
+            error: redisError.message
+          });
+        }
+      }
+
       return result.rows[0];
     } catch (error) {
       logger.error('Update bet status error:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Activate all pending bets for the current in_progress game session
+   * @returns {Promise<Array>} - List of activated bets
+   */
+  static async activatePendingBets() {
+    const client = await pool.connect();
+    try {
+      // Call the database function to activate pending bets
+      const result = await client.query('SELECT * FROM activate_pending_bets_with_redis()');
+      
+      // Cache activated bets in Redis if any exist
+      if (result.rows.length > 0) {
+        // Assuming the first row contains the game_session_id
+        const gameSessionId = result.rows[0].game_session_id;
+        
+        await RedisService.cacheActiveBets(gameSessionId, result.rows);
+        
+        logger.info('PENDING_BETS_ACTIVATED_AND_CACHED', {
+          service: 'aviator-backend',
+          activatedCount: result.rows.length,
+          gameSessionId,
+          activatedBetIds: result.rows.map(bet => bet.bet_id),
+          activatedUserIds: result.rows.map(bet => bet.user_id),
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        logger.info('NO_PENDING_BETS_TO_ACTIVATE', {
+          service: 'aviator-backend',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      return result.rows;
+    } catch (error) {
+      logger.error('ACTIVATE_PENDING_BETS_ERROR', {
+        service: 'aviator-backend',
+        error: error.message,
+        errorStack: error.stack,
+        timestamp: new Date().toISOString()
+      });
       throw error;
     } finally {
       client.release();
@@ -324,7 +483,6 @@ export default class PlayerBetRepository {
           game_session_id, 
           bet_amount, 
           cashout_multiplier, 
-          status, 
           payout_amount, 
           autocashout_multiplier,
           created_at
@@ -352,9 +510,7 @@ export default class PlayerBetRepository {
           bet_id, 
           game_session_id, 
           bet_amount, 
-          cashout_multiplier, 
           autocashout_multiplier,
-          status,
           created_at
         FROM player_bets
         WHERE 
@@ -382,7 +538,6 @@ export default class PlayerBetRepository {
           bet_amount, 
           cashout_multiplier, 
           autocashout_multiplier,
-          status,
           created_at
         FROM player_bets
         WHERE 
@@ -411,7 +566,6 @@ export default class PlayerBetRepository {
           bet_amount, 
           cashout_multiplier, 
           autocashout_multiplier,
-          status,
           created_at
         FROM player_bets
         WHERE 
@@ -503,6 +657,36 @@ export default class PlayerBetRepository {
         timestamp: new Date().toISOString()
       });
       return [];
+    }
+  }
+
+  /**
+   * Get all active bets for a game session
+   * @param {string} gameSessionId - Game session ID
+   * @returns {Promise<Array>} - List of active bets
+   */
+  static async getActiveBetsByGameSession(gameSessionId) {
+    try {
+      const result = await pool.query(
+        `SELECT 
+          bet_id, user_id, bet_amount, game_session_id, 
+          cashout_multiplier, autocashout_multiplier, 
+          payout_amount, bet_type, created_at
+        FROM player_bets 
+        WHERE game_session_id = $1 AND status = 'active'`,
+        [gameSessionId]
+      );
+
+      return result.rows;
+    } catch (error) {
+      logger.error('GET_ACTIVE_BETS_ERROR', {
+        service: 'aviator-backend',
+        gameSessionId,
+        error: error.message,
+        errorStack: error.stack,
+        timestamp: new Date().toISOString()
+      });
+      throw error;
     }
   }
 

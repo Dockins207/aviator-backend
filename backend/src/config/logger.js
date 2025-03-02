@@ -192,7 +192,7 @@ const fileTransport = new winston.transports.DailyRotateFile({
 });
 
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'debug', // Change to debug
+  level: 'debug', // Force debug logging
   format: winston.format.combine(
     logFilter(),
     winston.format.json()

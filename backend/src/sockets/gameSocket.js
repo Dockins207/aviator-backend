@@ -1,6 +1,6 @@
 import gameService from '../services/gameService.js';
 import gameUtils from '../utils/gameUtils.js';
-import betService from '../services/betService.js';
+import BetService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authService } from '../services/authService.js';
 import { validateToken } from '../utils/authUtils.js';
@@ -10,7 +10,7 @@ import { EventEmitter } from 'events';
 class GameSocket {
   constructor(io) {
     this.io = io;
-    this.betService = betService;
+    this.betService = new BetService();
     this.gameStateBroadcastInterval = null;
     // Track the last logged game ID to prevent multiple logs
     this.lastLoggedGameId = null;

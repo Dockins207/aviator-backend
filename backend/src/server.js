@@ -182,7 +182,7 @@ async function startServer() {
     
     // Handle different socket initialization patterns
     const betSocket = new BetSocketClass(io);
-    betSocket.initialize();
+    betSocket.start();
 
     // Comprehensive Health Check Route
     app.get('/api/health', (req, res) => {
