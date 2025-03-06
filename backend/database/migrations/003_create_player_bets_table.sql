@@ -45,7 +45,7 @@ CREATE TABLE player_bets (
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     game_session_id UUID NULL REFERENCES game_sessions(game_session_id) ON DELETE CASCADE,
     bet_amount DECIMAL(10, 2) NOT NULL CHECK (bet_amount >= 10),
-    cashout_multiplier DECIMAL(10, 2),
+    cashout_multiplier JSONB,
     status bet_status DEFAULT 'pending',
     payout_amount DECIMAL(10, 2) CHECK (payout_amount >= 0),
     autocashout_multiplier DECIMAL(10, 2),
@@ -193,14 +193,14 @@ BEGIN
     SET 
         status = (
             CASE 
-                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier >= p_final_crash_point 
+                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier <= p_final_crash_point 
                 THEN 'won'::bet_status
                 ELSE 'lost'::bet_status
             END
         ),
         payout_amount = (
             CASE 
-                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier >= p_final_crash_point 
+                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier <= p_final_crash_point 
                 THEN pb.bet_amount * pb.cashout_multiplier
                 ELSE 0
             END
@@ -262,8 +262,7 @@ CREATE OR REPLACE FUNCTION place_bet(
     p_user_id UUID,
     p_bet_amount DECIMAL(10, 2),
     p_game_session_id UUID DEFAULT NULL,
-    p_autocashout_multiplier DECIMAL(10, 2) DEFAULT NULL,
-    p_cashout_multiplier DECIMAL(10, 2) DEFAULT NULL
+    p_autocashout_multiplier DECIMAL(10, 2) DEFAULT NULL
 ) RETURNS UUID AS $$
 DECLARE
     v_bet_id UUID;
@@ -356,8 +355,7 @@ BEGIN
                 -- Check payout first (set by backend during cashout)
                 WHEN payout_amount > 0 THEN 'won'::bet_status
                 -- Check manual cashout
-                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier >= v_crash_point
-                THEN 'won'::bet_status
+                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier > 1.00 THEN 'won'::bet_status
                 -- Check auto cashout against crash point
                 WHEN autocashout_multiplier IS NOT NULL AND
                      v_crash_point >= autocashout_multiplier
