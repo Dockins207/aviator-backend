@@ -1750,29 +1750,83 @@ class GameRepository {
   }
 
   async markGameSessionComplete(gameSessionId, crashPoint) {
+    // Validate crash point value
+    if (typeof crashPoint === 'string') {
+      crashPoint = parseFloat(crashPoint);
+    }
+
+    if (isNaN(crashPoint) || crashPoint <= 0) {
+      const error = new Error('Invalid crash point value');
+      logger.error('GAME_SESSION_COMPLETE_ERROR', { 
+        service: 'aviator-backend',
+        gameSessionId,
+        error: error.message,
+        crashPoint
+      });
+      throw error;
+    }
+
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
+      // First check if the game session exists and is in the correct state
+      const checkQuery = `
+        SELECT status 
+        FROM game_sessions 
+        WHERE game_session_id = $1
+      `;
+      
+      const checkResult = await client.query(checkQuery, [gameSessionId]);
+      
+      if (checkResult.rows.length === 0) {
+        logger.warn('GAME_SESSION_NOT_FOUND', { 
+          service: 'aviator-backend',
+          gameSessionId
+        });
+        throw new Error(`No game session found with ID: ${gameSessionId}`);
+      }
+
       // Update game session status to completed
       const updateQuery = `
         UPDATE game_sessions 
-        SET status = 'completed', crash_point = $1
-        WHERE game_session_id = $2
-        RETURNING *
+        SET 
+          status = 'completed',
+          crash_point = $1,
+          ended_at = CURRENT_TIMESTAMP
+        WHERE 
+          game_session_id = $2 AND 
+          status != 'completed'
+        RETURNING game_session_id, crash_point, status
       `;
+      
       const result = await client.query(updateQuery, [crashPoint, gameSessionId]);
 
       if (result.rows.length === 0) {
-        throw new Error('No game session found with the given ID');
+        logger.warn('GAME_SESSION_ALREADY_COMPLETED', { 
+          service: 'aviator-backend',
+          gameSessionId,
+          currentStatus: checkResult.rows[0].status
+        });
+        throw new Error(`Game session ${gameSessionId} is already in ${checkResult.rows[0].status} status`);
       }
 
       await client.query('COMMIT');
-      logger.info('Game session marked as complete', { gameSessionId, crashPoint });
+      logger.info('GAME_SESSION_COMPLETE_SUCCESS', { 
+        service: 'aviator-backend',
+        gameSessionId, 
+        crashPoint: result.rows[0].crash_point,
+        status: result.rows[0].status
+      });
       return result.rows[0];
     } catch (error) {
       await client.query('ROLLBACK');
-      logger.error('Error marking game session complete', { gameSessionId, error: error.message });
+      logger.error('GAME_SESSION_COMPLETE_ERROR', { 
+        service: 'aviator-backend',
+        gameSessionId, 
+        error: error.message,
+        errorStack: error.stack
+      });
       throw error;
     } finally {
       client.release();

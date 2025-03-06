@@ -237,13 +237,13 @@ BEGIN
     NEW.status := NEW.status::game_status;
 
     -- Automatically mark session as completed when game crashes
-    IF NEW.status = 'in_progress'::game_status AND NEW.crash_point_history IS NOT NULL THEN
+    IF NEW.status = 'in_progress'::game_status AND NEW.crash_point IS NOT NULL THEN
         NEW.status := 'completed'::game_status;
         
         -- Resolve bets when session is completed
         PERFORM resolve_game_session_bets(
             NEW.game_session_id, 
-            (NEW.crash_point_history->>'crash_point')::DECIMAL(10,2)
+            NEW.crash_point
         );
     END IF;
 
