@@ -1,7 +1,7 @@
-import logger from '../config/logger.js';
-import GameRepository from '../repositories/gameRepository.js';
-import WalletRepository from '../repositories/walletRepository.js';
 import PlayerBetRepository from '../repositories/playerBetRepository.js';
+import WalletRepository from '../repositories/walletRepository.js';
+import GameRepository from '../repositories/gameRepository.js';
+import logger from '../config/logger.js';
 import crypto from 'crypto';
 
 class BetService {
@@ -13,156 +13,154 @@ class BetService {
     this.MIN_BET_AMOUNT = 10;
     this.MAX_BET_AMOUNT = 50000;
 
-    // In-memory store for bet tokens (consider using Redis in production)
+    // In-memory store for bet tokens and bet references (consider using Redis in production)
     this.betTokens = new Map();
+    this.betReferences = new Map(); // Maps reference IDs to actual bet IDs
+    this.reverseBetReferences = new Map(); // Maps actual bet IDs to reference IDs
   }
 
   /**
-   * Process bet placement
-   * @param {Object} betDetails - Bet details including amount and user ID
+   * Place a bet
+   * @param {Object} betDetails - Bet details
    * @returns {Promise<Object>} - Bet placement result
    */
-  async processBetPlacement(betDetails) {
+  async placeBet(betDetails) {
     try {
-      // Ensure userId is a string and extract from object if needed
-      const userId = typeof betDetails.userId === 'object' 
-        ? betDetails.userId.userId 
-        : betDetails.userId;
-
       // Validate bet details
-      await this.validateBetDetails({
-        userId,
-        amount: betDetails.betAmount || betDetails.amount,
-        autoCashoutMultiplier: betDetails.autoCashoutMultiplier
-      });
+      const { userId, betAmount, betType, autoCashoutMultiplier, gameSessionId } = betDetails;
+      
+      // Validate bet amount
+      if (!betAmount || isNaN(betAmount) || betAmount < this.MIN_BET_AMOUNT || betAmount > this.MAX_BET_AMOUNT) {
+        return { 
+          success: false, 
+          error: `Bet amount must be between ${this.MIN_BET_AMOUNT} and ${this.MAX_BET_AMOUNT}` 
+        };
+      }
 
-      // Place bet using PlayerBetRepository
+      // Validate auto-cashout multiplier for auto bets
+      if (betType === 'auto' && (!autoCashoutMultiplier || autoCashoutMultiplier <= 1)) {
+        return { 
+          success: false, 
+          error: 'Auto-cashout multiplier must be greater than 1' 
+        };
+      }
+
+      // Get current game session if not provided
+      const activeGameSessionId = gameSessionId || await this.gameRepository.getCurrentActiveGameSession();
+      if (!activeGameSessionId) {
+        return { 
+          success: false, 
+          error: 'No active game session available' 
+        };
+      }
+
+      // Place bet in database
       const result = await PlayerBetRepository.placeBet({
         userId,
-        betAmount: betDetails.betAmount || betDetails.amount,
-        autocashoutMultiplier: betDetails.autoCashoutMultiplier,
-        betType: betDetails.autoCashoutMultiplier ? 'auto' : 'manual'
+        betAmount,
+        gameSessionId: activeGameSessionId,
+        autocashoutMultiplier: autoCashoutMultiplier,
+        betType: betType || 'manual'
+      });
+
+      if (!result || !result.bet_id) {
+        return { 
+          success: false, 
+          error: 'Failed to place bet' 
+        };
+      }
+
+      // Generate a secure reference ID for this bet
+      const betReferenceId = this.generateBetReference(result.bet_id, userId);
+
+      // Log successful bet placement
+      logger.info('BET_PLACED', {
+        service: 'aviator-backend',
+        userId,
+        actualBetId: result.bet_id,
+        betReferenceId,
+        betAmount,
+        betType,
+        autoCashoutMultiplier,
+        timestamp: new Date().toISOString()
       });
 
       return {
         success: true,
-        message: 'Bet placed successfully'
+        betId: betReferenceId, // Return the reference ID instead of actual bet ID
+        betAmount,
+        betType,
+        autoCashoutMultiplier
       };
-
     } catch (error) {
       logger.error('BET_PLACEMENT_ERROR', {
+        service: 'aviator-backend',
         userId: betDetails.userId,
-        amount: betDetails.betAmount || betDetails.amount,
-        error: error.message
+        error: error.message,
+        errorStack: error.stack,
+        timestamp: new Date().toISOString()
       });
-      throw error;
+      return { 
+        success: false, 
+        error: 'An error occurred while placing your bet' 
+      };
     }
   }
 
   /**
-   * Validate bet details
-   * @param {Object} betDetails - Bet details to validate
+   * Process cashout for a bet
+   * @param {Object} options - Cashout options
+   * @param {string} options.userId - User ID
+   * @param {string} options.betId - Bet reference ID
+   * @param {number} options.cashoutMultiplier - Cashout multiplier
+   * @returns {Promise<Object>} - Cashout result
    */
-  async validateBetDetails(betDetails) {
-    // Validate required fields
-    if (!betDetails.userId || !betDetails.amount) {
-      throw new Error('Missing required bet details');
-    }
-
-    // Validate bet amount
-    if (betDetails.amount <= 0) {
-      throw new Error('Bet amount must be greater than 0');
-    }
-
-    // Optional auto-cashout validation
-    if (betDetails.autoCashoutMultiplier !== undefined && betDetails.autoCashoutMultiplier !== null) {
-      if (typeof betDetails.autoCashoutMultiplier !== 'number') {
-        logger.warn('INVALID_AUTO_CASHOUT', {
-          userId: betDetails.userId,
-          reason: 'Invalid auto-cashout multiplier type',
-          value: betDetails.autoCashoutMultiplier
-        });
-        throw new Error('Invalid auto-cashout multiplier: Must be a number');
-      }
-
-      if (betDetails.autoCashoutMultiplier <= 1) {
-        throw new Error('Invalid auto-cashout multiplier: Must be greater than 1');
-      }
-    }
-
-    // Validate bet amount against limits
-    if (betDetails.amount < this.MIN_BET_AMOUNT || betDetails.amount > this.MAX_BET_AMOUNT) {
-      throw new Error(`Bet amount must be between ${this.MIN_BET_AMOUNT} and ${this.MAX_BET_AMOUNT}`);
-    }
-  }
-
   async processCashout(options) {
-    const { 
-      userId, 
-      betId, 
-      cashoutMultiplier, 
-      autoCashoutMultiplier 
-    } = options;
+    const { userId, betId, cashoutMultiplier } = options;
 
-    // Validate input
-    if (!userId || !betId) {
-      throw new Error('Missing required cashout parameters');
+    // Minimal input validation
+    if (!userId || !betId || cashoutMultiplier <= 1) {
+      return {
+        success: false,
+        error: 'Invalid cashout parameters'
+      };
     }
 
-    // Retrieve bet details to determine cashout type
-    const betDetails = await PlayerBetRepository.findBetById(betId);
-    if (!betDetails) {
-      throw new Error('Bet not found');
+    try {
+      // Translate reference ID to actual bet ID
+      const actualBetId = this.getActualBetId(betId, userId);
+      if (!actualBetId) {
+        return {
+          success: false,
+          error: 'Invalid bet reference'
+        };
+      }
+
+      // Single repository method for cashout
+      const result = await PlayerBetRepository.cashoutBet({
+        betId: actualBetId,
+        userId,
+        currentMultiplier: cashoutMultiplier
+      });
+
+      return {
+        success: true,
+        betId,  // Return reference ID
+        payoutAmount: result.winAmount,
+        newBalance: result.newBalance
+      };
+    } catch (error) {
+      logger.error('CASHOUT_ERROR', {
+        userId,
+        betId,
+        errorMessage: error.message
+      });
+
+      return {
+        success: false,
+        error: 'Cashout failed'
+      };
     }
-
-    // Determine cashout type and validate multiplier
-    const isManuallyCashedOut = cashoutMultiplier !== undefined;
-    const isAutoCashout = betDetails.betType === 'auto';
-
-    // For auto cashout, use the pre-stored auto-cashout multiplier
-    const finalCashoutMultiplier = isManuallyCashedOut 
-      ? cashoutMultiplier 
-      : (isAutoCashout 
-          ? betDetails.autoCashoutMultiplier  // Use stored auto-cashout multiplier
-          : null);
-
-    // Validate multipliers
-    if (finalCashoutMultiplier !== null && finalCashoutMultiplier <= 1) {
-      throw new Error('Cashout multiplier must be greater than 1');
-    }
-
-    // Log cashout attempt with detailed context
-    logger.info('PROCESSING_CASHOUT', {
-      userId,
-      betId,
-      betType: betDetails.betType,
-      cashoutMethod: isManuallyCashedOut ? 'manual' : 'auto',
-      storedAutoCashoutMultiplier: betDetails.autoCashoutMultiplier,
-      finalCashoutMultiplier
-    });
-
-    // Ensure we have a valid cashout multiplier
-    if (finalCashoutMultiplier === null) {
-      throw new Error('No valid cashout multiplier found');
-    }
-
-    // Process cashout through repository
-    const result = await PlayerBetRepository.cashoutBet({
-      betId,
-      userId,
-      cashoutMultiplier: finalCashoutMultiplier,
-      betType: betDetails.betType
-    });
-
-    // Prepare detailed cashout response
-    return {
-      success: true,
-      betId,
-      winAmount: result.winAmount,
-      cashoutMultiplier: finalCashoutMultiplier,
-      betType: betDetails.betType,
-      originalAutoCashoutMultiplier: betDetails.autoCashoutMultiplier
-    };
   }
 
   async findBetAcrossStores(betId, gameSessionId) {
@@ -330,6 +328,66 @@ class BetService {
     }
   }
 
+  /**
+   * Generate a secure reference ID for a bet
+   * @param {string} betId - Actual database bet ID
+   * @param {string} userId - User ID
+   * @returns {string} - Secure reference ID
+   */
+  generateBetReference(betId, userId) {
+    // Generate a random reference ID
+    const referenceId = crypto.randomBytes(12).toString('hex');
+    
+    // Store the mapping
+    this.betReferences.set(referenceId, { betId, userId, createdAt: Date.now() });
+    this.reverseBetReferences.set(betId, referenceId);
+    
+    // Log the mapping (for debugging only, remove in production)
+    logger.debug('BET_REFERENCE_CREATED', {
+      service: 'aviator-backend',
+      referenceId,
+      actualBetId: betId,
+      userId,
+      timestamp: new Date().toISOString()
+    });
+    
+    return referenceId;
+  }
+
+  /**
+   * Get the actual bet ID from a reference ID
+   * @param {string} referenceId - Reference ID
+   * @param {string} userId - User ID for validation
+   * @returns {string|null} - Actual bet ID or null if not found/unauthorized
+   */
+  getActualBetId(referenceId, userId) {
+    const mapping = this.betReferences.get(referenceId);
+    
+    // Check if mapping exists and belongs to the user
+    if (!mapping || mapping.userId !== userId) {
+      logger.warn('INVALID_BET_REFERENCE', {
+        service: 'aviator-backend',
+        referenceId,
+        userId,
+        found: !!mapping,
+        authorized: mapping && mapping.userId === userId,
+        timestamp: new Date().toISOString()
+      });
+      return null;
+    }
+    
+    return mapping.betId;
+  }
+
+  /**
+   * Get reference ID for a bet
+   * @param {string} betId - Actual bet ID
+   * @returns {string|null} - Reference ID or null if not found
+   */
+  getBetReferenceId(betId) {
+    return this.reverseBetReferences.get(betId) || null;
+  }
+
   // Enhanced token generation to capture original bet details
   generateBetToken(betId, userId, additionalContext = {}) {
     const token = crypto.randomBytes(32).toString('hex');
@@ -406,6 +464,57 @@ class BetService {
       additionalContext: tokenData
     };
   }
+
+  /**
+   * Get current active bets
+   * @returns {Promise<Array>} - List of current active bets
+   */
+  async getCurrentBets() {
+    try {
+      // Get current game session
+      const gameSessionId = await this.gameRepository.getCurrentActiveGameSession();
+      if (!gameSessionId) {
+        logger.warn('NO_ACTIVE_GAME_SESSION_FOR_CURRENT_BETS', {
+          service: 'aviator-backend',
+          timestamp: new Date().toISOString()
+        });
+        return [];
+      }
+
+      // Get active bets from database
+      const activeBets = await PlayerBetRepository.getActiveBetsByGameSession(gameSessionId);
+      
+      // Map the bets to use reference IDs instead of actual bet IDs
+      const mappedBets = activeBets.map(bet => {
+        // Generate a reference ID if one doesn't exist
+        let betReferenceId = this.getBetReferenceId(bet.bet_id);
+        if (!betReferenceId) {
+          betReferenceId = this.generateBetReference(bet.bet_id, bet.user_id);
+        }
+        
+        // Return a sanitized version with reference ID instead of actual ID
+        return {
+          betId: betReferenceId,
+          userId: bet.user_id,
+          betAmount: bet.bet_amount,
+          betType: bet.bet_type,
+          autoCashoutMultiplier: bet.autocashout_multiplier,
+          status: bet.status,
+          createdAt: bet.created_at
+        };
+      });
+
+      return mappedBets;
+    } catch (error) {
+      logger.error('GET_CURRENT_BETS_ERROR', {
+        service: 'aviator-backend',
+        error: error.message,
+        errorStack: error.stack,
+        timestamp: new Date().toISOString()
+      });
+      throw error;
+    }
+  }
 }
 
-export default new BetService();
+export default BetService;

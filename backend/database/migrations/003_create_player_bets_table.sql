@@ -193,14 +193,14 @@ BEGIN
     SET 
         status = (
             CASE 
-                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier <= p_final_crash_point 
+                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier >= p_final_crash_point 
                 THEN 'won'::bet_status
                 ELSE 'lost'::bet_status
             END
         ),
         payout_amount = (
             CASE 
-                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier <= p_final_crash_point 
+                WHEN pb.cashout_multiplier IS NOT NULL AND pb.cashout_multiplier >= p_final_crash_point 
                 THEN pb.bet_amount * pb.cashout_multiplier
                 ELSE 0
             END
@@ -262,7 +262,8 @@ CREATE OR REPLACE FUNCTION place_bet(
     p_user_id UUID,
     p_bet_amount DECIMAL(10, 2),
     p_game_session_id UUID DEFAULT NULL,
-    p_autocashout_multiplier DECIMAL(10, 2) DEFAULT NULL
+    p_autocashout_multiplier DECIMAL(10, 2) DEFAULT NULL,
+    p_cashout_multiplier DECIMAL(10, 2) DEFAULT NULL
 ) RETURNS UUID AS $$
 DECLARE
     v_bet_id UUID;
@@ -273,13 +274,15 @@ BEGIN
         game_session_id, 
         bet_amount, 
         status, 
-        autocashout_multiplier
+        autocashout_multiplier,
+        cashout_multiplier
     ) VALUES (
         p_user_id,
         p_game_session_id,
         p_bet_amount,
         'pending',
-        p_autocashout_multiplier
+        p_autocashout_multiplier,
+        p_cashout_multiplier
     ) RETURNING bet_id INTO v_bet_id;
     
     RETURN v_bet_id;
@@ -333,11 +336,19 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Drop existing function if exists
+DROP FUNCTION IF EXISTS auto_resolve_active_bets() CASCADE;
+
 -- Function to automatically resolve active bets when game session completes
 CREATE OR REPLACE FUNCTION auto_resolve_active_bets() RETURNS TRIGGER AS $$
+DECLARE
+    v_crash_point NUMERIC(5, 2);
 BEGIN
     -- Only proceed if we're transitioning from in_progress to completed
     IF NEW.status = 'completed'::game_status AND OLD.status = 'in_progress'::game_status THEN
+        -- Get the crash point
+        v_crash_point := NEW.crash_point;
+        
         -- Update active bets to won/lost based on payout and multipliers
         UPDATE player_bets
         SET
@@ -345,13 +356,22 @@ BEGIN
                 -- Check payout first (set by backend during cashout)
                 WHEN payout_amount > 0 THEN 'won'::bet_status
                 -- Check manual cashout
-                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier > 1.00 THEN 'won'::bet_status
+                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier >= v_crash_point
+                THEN 'won'::bet_status
                 -- Check auto cashout against crash point
                 WHEN autocashout_multiplier IS NOT NULL AND
-                     (NEW.crash_point_history->>'crash_point')::DECIMAL(10,2) >= autocashout_multiplier
+                     v_crash_point >= autocashout_multiplier
                 THEN 'won'::bet_status
                 -- Otherwise lost
                 ELSE 'lost'::bet_status
+            END,
+            payout_amount = CASE
+                WHEN payout_amount > 0 THEN payout_amount
+                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier >= v_crash_point
+                THEN bet_amount * cashout_multiplier
+                WHEN autocashout_multiplier IS NOT NULL AND v_crash_point >= autocashout_multiplier
+                THEN bet_amount * autocashout_multiplier
+                ELSE 0
             END
         WHERE
             status = 'active'::bet_status

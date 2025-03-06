@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from 'uuid';
 import gameUtils from '../utils/gameUtils.js';
 import gameConfig from '../config/gameConfig.js';
 import GameRepository from '../repositories/gameRepository.js';
-import GameSessionRepository from '../repositories/gameSessionRepository.js'; 
 import logger from '../config/logger.js';
 import notificationService from '../services/notificationService.js';
 import socketService from '../services/socketService.js';
@@ -363,17 +362,19 @@ class GameBoardService extends EventEmitter {
       // Create a new repository instance
       const gameRepo = new GameRepository();
 
-      // Removed verbose logging
-      // console.log('Attempting to mark game session complete', {
-      //   gameSessionId: this.gameState.gameId,
-      //   crashPoint
-      // });
+      // Log the entire completionDetails object before passing it to markGameSessionComplete
+      const completionDetails = {
+        crash_point: Number(this.gameState.crashPoint.toFixed(2))
+      };
+      logger.info('Preparing to mark game session complete', {
+        gameSessionId: this.gameState.gameId,
+        completionDetails
+      });
 
+      // Convert crashPoint to a number before passing it to markGameSessionComplete
       const completedSession = await gameRepo.markGameSessionComplete(
         this.gameState.gameId,
-        {
-          crash_point: crashPoint
-        }
+        Number(this.gameState.crashPoint)
       );
 
       // Removed verbose logging

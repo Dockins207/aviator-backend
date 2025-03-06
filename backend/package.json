@@ -8,13 +8,13 @@
     "start": "node dist/server.js",
     "dev": "nodemon --experimental-specifier-resolution=node src/server.js",
     "build": "npm run clean && npm run copy",
-    "copy": "cp -r src dist",
-    "clean": "rm -rf dist",
     "migrate": "node --experimental-specifier-resolution=node ../database/scripts/migrate.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:redis": "node --experimental-specifier-resolution=node tests/redisIntegration.test.js",
     "redis": "node redis-server.js",
-    "redis:dev": "nodemon redis-server.js"
+    "redis:dev": "nodemon redis-server.js",
+    "copy": "xcopy /E /I src dist",
+    "clean": "if exist dist rmdir /s /q dist"
   },
   "keywords": [],
   "author": "",

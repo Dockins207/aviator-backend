@@ -1,8 +1,6 @@
 import pkg from 'pg';
 import crypto from 'crypto';
 import logger from '../config/logger.js';
-import { GameSession } from '../models/GameSession.js';
-import { PlayerBet } from '../models/PlayerBet.js';
 import { pool as dbPool } from '../config/database.js';
 import { redisClient } from '../config/redis.js';
 
@@ -74,8 +72,15 @@ class GameRepository {
    * @returns {Promise<string>} Created game session ID
    */
   async createGameSession(sessionData = {}) {
-    const gameSessionId = GameRepository.generateGameSessionId();
-    
+      const existingSession = await this.getCurrentActiveGameSession();
+      if (existingSession) {
+          // Return an error or a message indicating an active session exists
+          throw new Error('An active game session already exists.');
+      }
+      const gameSessionId = GameRepository.generateGameSessionId();
+      // Proceed with creating a new game session
+      const newSession = await this.db.insert('game_sessions', sessionData);
+      return newSession;
     try {
       const query = `
         INSERT INTO game_sessions 
@@ -120,7 +125,7 @@ class GameRepository {
   /**
    * Normalize game session ID to a standard UUID
    * @param {string} gameSessionId - Game session ID to normalize
-   * @returns {string} - Normalized UUID
+   * @returns {string} - Normalized game session ID
    */
   static normalizeGameSessionId(gameSessionId) {
     // If already a valid UUID, return as-is
@@ -695,7 +700,7 @@ class GameRepository {
             status: bet.status
           }));
 
-          await redisClient.set(redisBetsKey, JSON.stringify(redisData));
+          await redisClient.set(redisBetsKey, redisData);
 
           logger.info('ACTIVE_BETS_PUSHED_TO_REDIS', {
             gameSessionId,
@@ -1744,121 +1749,32 @@ class GameRepository {
     }
   }
 
-  async markGameSessionComplete(gameSessionId, completionDetails = {}) {
-    console.log('Attempting to mark game session complete:', { gameSessionId, completionDetails });
-    
+  async markGameSessionComplete(gameSessionId, crashPoint) {
     const client = await this.pool.connect();
-
     try {
-      // Start transaction
       await client.query('BEGIN');
 
-      // Validate required fields
-      if (!gameSessionId) {
-        throw new Error('Game Session ID is required');
-      }
-
-      // Prepare crash point entry with exact structure
-      const crashPointEntry = {
-        timestamp: new Date().toISOString(),
-        crash_point: completionDetails.crash_point !== undefined 
-          ? completionDetails.crash_point.toString() 
-          : null
-      };
-
-      // Construct the query to set crash_point_history
-      const query = `
-        UPDATE game_sessions
-        SET 
-          status = $3::game_status, 
-          crash_point_history = $2::JSONB
-        WHERE game_session_id = $1
+      // Update game session status to completed
+      const updateQuery = `
+        UPDATE game_sessions 
+        SET status = 'completed', crash_point = $1
+        WHERE game_session_id = $2
         RETURNING *
       `;
+      const result = await client.query(updateQuery, [crashPoint, gameSessionId]);
 
-      console.log('Executing query:', { 
-        query, 
-        gameSessionId,
-        crashPointEntry
-      });
-
-      try {
-        // Execute the query
-        const result = await client.query(query, [
-          gameSessionId, 
-          crashPointEntry,
-          'completed'
-        ]);
-
-        // Commit transaction
-        await client.query('COMMIT');
-
-        if (result.rows.length === 0) {
-          console.warn('GAME_SESSION_COMPLETE_FAILED', {
-            gameSessionId,
-            reason: 'Game session not found'
-          });
-          logger.warn('GAME_SESSION_COMPLETE_FAILED', {
-            gameSessionId,
-            reason: 'Game session not found'
-          });
-          return null;
-        }
-
-        // Log successful game session completion
-        console.log('GAME_SESSION_COMPLETED', {
-          gameSessionId,
-          status: result.rows[0].status,
-          crashPointHistory: result.rows[0].crash_point_history
-        });
-
-        logger.info('GAME_SESSION_COMPLETED', {
-          gameSessionId,
-          status: result.rows[0].status,
-          crashPointHistory: result.rows[0].crash_point_history
-        });
-
-        return result.rows[0];
-      } catch (error) {
-        console.error('GAME_SESSION_COMPLETE_ERROR', {
-          gameSessionId,
-          errorMessage: error.message,
-          errorStack: error.stack,
-          errorDetails: {
-            sqlState: error.code,
-            detail: error.detail,
-            hint: error.hint
-          }
-        });
-        logger.error('GAME_SESSION_COMPLETE_ERROR', {
-          gameSessionId,
-          errorMessage: error.message,
-          errorStack: error.stack
-        });
-        throw error;
+      if (result.rows.length === 0) {
+        throw new Error('No game session found with the given ID');
       }
+
+      await client.query('COMMIT');
+      logger.info('Game session marked as complete', { gameSessionId, crashPoint });
+      return result.rows[0];
     } catch (error) {
-      // Rollback transaction on error
       await client.query('ROLLBACK');
-
-      // Log game session completion error
-      console.error('GAME_SESSION_COMPLETE_ERROR', {
-        gameSessionId,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        completionDetails
-      });
-
-      logger.error('GAME_SESSION_COMPLETE_ERROR', {
-        gameSessionId,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        completionDetails
-      });
-
+      logger.error('Error marking game session complete', { gameSessionId, error: error.message });
       throw error;
     } finally {
-      // Release the client back to the pool
       client.release();
     }
   }

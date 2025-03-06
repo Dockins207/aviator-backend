@@ -185,4 +185,34 @@ export class UserRepository {
   static generateReferralCode() {
     return Math.random().toString(36).substring(2, 8).toUpperCase();
   }
+
+  // Find user by ID
+  static async findById(userId) {
+    const query = `
+      SELECT * FROM users 
+      WHERE user_id = $1
+    `;
+
+    try {
+      logger.debug('USER_LOOKUP_BY_ID', {
+        userId
+      });
+
+      const result = await pool.query(query, [userId]);
+      
+      logger.debug('USER_LOOKUP_RESULT', {
+        userId,
+        userFound: result.rows.length > 0
+      });
+
+      return result.rows.length > 0 ? User.fromRow(result.rows[0]) : null;
+    } catch (error) {
+      logger.error('Error finding user by ID', { 
+        userId, 
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    }
+  }
 }

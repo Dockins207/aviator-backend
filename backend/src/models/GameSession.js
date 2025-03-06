@@ -17,7 +17,6 @@ export class GameSession {
       totalBetAmount: parseFloat(row.total_bet_amount || 0),
       crashPoint: row.crash_point ? parseFloat(row.crash_point) : null,
       createdAt: row.created_at,
-      updatedAt: row.updated_at
     });
   }
 }

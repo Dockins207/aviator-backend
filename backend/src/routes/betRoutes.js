@@ -1,12 +1,13 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import betService from '../services/betService.js';
+import BetService from '../services/betService.js';
 import logger from '../config/logger.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import GameRepository from '../repositories/gameRepository.js';
 import gameService from '../services/gameService.js';
 
 const router = express.Router();
+const betService = new BetService();
 
 // Middleware to log all bet-related requests
 const betRequestLogger = (req, res, next) => {
@@ -117,7 +118,7 @@ router.post('/cashout',
   authMiddleware.authenticateToken, 
   async (req, res) => {
     try {
-      const { multiplier } = req.body;
+      const { multiplier, betId } = req.body;
       
       // Validate multiplier
       if (!multiplier || isNaN(multiplier) || multiplier <= 1) {
@@ -136,7 +137,11 @@ router.post('/cashout',
         });
       }
 
-      const result = await betService.processCashout(userId, parseFloat(multiplier), req.socket);
+      const result = await betService.processCashout({
+        userId,
+        betId,
+        cashoutMultiplier: parseFloat(multiplier)
+      });
       
       res.status(200).json({
         success: true,
