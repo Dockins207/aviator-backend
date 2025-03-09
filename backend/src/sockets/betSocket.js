@@ -402,7 +402,6 @@ class BetSocket {
       }
 
       // Extract and validate bet parameters
-      // The frontend is sending amount directly in the payload
       const betAmount = data.amount; 
       const betType = data.betType || 'manual';
       const autoCashoutMultiplier = data.autoCashoutMultiplier;
@@ -440,24 +439,13 @@ class BetSocket {
         return { success: false, error: 'Auto-cashout multiplier must be greater than 1' };
       }
 
-      // Get current game session
-      const gameSessionId = await this.gameRepository.getCurrentActiveGameSession();
-      if (!gameSessionId) {
-        logger.warn('NO_ACTIVE_GAME_SESSION_FOR_BET', {
-          service: 'aviator-backend',
-          userId: socket.userId,
-          timestamp: new Date().toISOString()
-        });
-        return { success: false, error: 'No active game session available' };
-      }
-
-      // Place the bet
+      // REMOVE THE GAME SESSION CHECK - Allow bets without an active session
+      // Place the bet without requiring a game session
       const result = await this.betService.placeBet({
         userId: socket.userId,
         betAmount,
         betType,
-        autoCashoutMultiplier,
-        gameSessionId
+        autoCashoutMultiplier
       });
 
       if (!result.success) {
@@ -467,7 +455,6 @@ class BetSocket {
           betAmount,
           betType,
           autoCashoutMultiplier,
-          gameSessionId,
           error: result.error,
           timestamp: new Date().toISOString()
         });
@@ -478,15 +465,14 @@ class BetSocket {
       logger.info('BET_PLACED_SUCCESSFULLY', {
         service: 'aviator-backend',
         userId: socket.userId,
-        betReferenceId: result.betId, // This is now a reference ID, not the actual bet ID
+        betReferenceId: result.betId,
         betAmount,
         betType,
         autoCashoutMultiplier,
-        gameSessionId,
         timestamp: new Date().toISOString()
       });
 
-      return result; // The result already contains the reference ID instead of the actual bet ID
+      return result;
     } catch (error) {
       logger.error('BET_PLACEMENT_ERROR', {
         service: 'aviator-backend',

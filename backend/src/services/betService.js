@@ -45,20 +45,10 @@ class BetService {
         };
       }
 
-      // Get current game session if not provided
-      const activeGameSessionId = gameSessionId || await this.gameRepository.getCurrentActiveGameSession();
-      if (!activeGameSessionId) {
-        return { 
-          success: false, 
-          error: 'No active game session available' 
-        };
-      }
-
-      // Place bet in database
+      // Place bet in database - without requiring an active game session
       const result = await PlayerBetRepository.placeBet({
         userId,
         betAmount,
-        gameSessionId: activeGameSessionId,
         autocashoutMultiplier: autoCashoutMultiplier,
         betType: betType || 'manual'
       });
@@ -90,9 +80,24 @@ class BetService {
         betId: betReferenceId, // Return the reference ID instead of actual bet ID
         betAmount,
         betType,
-        autoCashoutMultiplier
+        autoCashoutMultiplier,
+        status: 'pending'
       };
     } catch (error) {
+      if (error.message.includes('function place_bet(unknown, unknown, unknown, unknown) is not unique')) {
+        logger.error('BET_PLACEMENT_ERROR', {
+          service: 'aviator-backend',
+          userId: betDetails.userId,
+          error: 'Database function place_bet is not unique',
+          errorStack: error.stack,
+          timestamp: new Date().toISOString()
+        });
+        return { 
+          success: false, 
+          error: 'Database function place_bet is not unique' 
+        };
+      }
+
       logger.error('BET_PLACEMENT_ERROR', {
         service: 'aviator-backend',
         userId: betDetails.userId,

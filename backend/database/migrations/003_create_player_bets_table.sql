@@ -255,14 +255,14 @@ CREATE TRIGGER game_session_status_transition
     FOR EACH ROW
     EXECUTE FUNCTION manage_game_session_status();
 
--- Drop all versions of the function to clean up
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, json, numeric);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric, text);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, json, text);
+-- Drop all versions of the function to clean up - enhanced with unknown types
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid, numeric);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid);
 DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, unknown, unknown);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric);
+DROP FUNCTION IF EXISTS place_bet(unknown, unknown, unknown, unknown);
 
--- Recreate the function with a clear signature
+-- Recreate the function with a clear signature and always set status to pending
 CREATE OR REPLACE FUNCTION place_bet(
     p_user_id uuid,
     p_bet_amount numeric,
@@ -272,7 +272,6 @@ CREATE OR REPLACE FUNCTION place_bet(
 RETURNS uuid AS $$
 DECLARE
     v_bet_id uuid;
-    v_current_game_session_id uuid;
     v_wallet_balance numeric;
 BEGIN
     -- Check wallet balance
@@ -290,16 +289,8 @@ BEGIN
     SET balance = balance - p_bet_amount
     WHERE user_id = p_user_id;
     
-    -- Find the current betting phase game if no session ID provided
-    IF p_game_session_id IS NULL THEN
-        SELECT game_session_id INTO v_current_game_session_id
-        FROM game_sessions
-        WHERE status = 'betting'
-        ORDER BY created_at DESC
-        LIMIT 1;
-    ELSE
-        v_current_game_session_id := p_game_session_id;
-    END IF;
+    -- IMPORTANT: Always create bet with NULL game_session_id
+    -- We don't try to find a current session anymore
     
     -- Create bet record
     INSERT INTO player_bets (
@@ -313,8 +304,8 @@ BEGIN
     VALUES (
         p_user_id, 
         p_bet_amount, 
-        v_current_game_session_id,
-        CASE WHEN v_current_game_session_id IS NOT NULL THEN 'active' ELSE 'pending' END,
+        NULL, -- Always NULL regardless of what was passed
+        'pending', -- Always pending
         p_autocashout_multiplier,
         CASE 
             WHEN p_autocashout_multiplier IS NOT NULL THEN 'auto'
@@ -468,7 +459,3 @@ DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
 SELECT column_name 
 FROM information_schema.columns 
 WHERE table_name = 'player_bets';
-
--- Then add the missing column if needed
-ALTER TABLE player_bets 
-ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(user_id) ON DELETE CASCADE;

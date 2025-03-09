@@ -640,10 +640,10 @@ export default class PlayerBetRepository {
 
   /**
    * Place a bet for a user
-   * This version uses the database function to handle game session assignment
+   * Always creates bets with NULL game_session_id and 'pending' status
    */
-  async placeBet(userId, betAmount, autoCashoutMultiplier = null, betType = 'standard') {
-    const client = await this.pool.connect();
+  async placeBet(userId, betAmount, autocashoutMultiplier, betType) {
+    const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
@@ -664,53 +664,46 @@ export default class PlayerBetRepository {
         [betAmount, userId]
       );
       
-      // Call the database function - this will handle game session assignment via triggers
+      // Directly insert with NULL game_session_id
       const query = `
-        SELECT place_bet($1, $2, NULL, $3) as bet_id
+        INSERT INTO player_bets (
+          user_id, 
+          bet_amount, 
+          autocashout_multiplier, 
+          bet_type,
+          status,
+          game_session_id
+        ) VALUES ($1, $2, $3, $4, 'pending', NULL)
+        RETURNING bet_id
       `;
-      
+
       const result = await client.query(query, [
         userId, 
         betAmount, 
-        autoCashoutMultiplier
+        autocashoutMultiplier, 
+        betType
       ]);
       
       if (!result.rows[0]?.bet_id) {
         throw new Error('Failed to create bet');
       }
-
-      // Get the created bet with game session info
-      const betDetails = await client.query(
-        `SELECT bet_id, game_session_id, status 
-         FROM player_bets WHERE bet_id = $1`,
-        [result.rows[0].bet_id]
-      );
       
       await client.query('COMMIT');
       
-      logger.info('BET_PLACED', {
+      logger.info('BET_PLACED_WITHOUT_SESSION', {
         service: 'aviator-backend',
         betId: result.rows[0].bet_id,
         userId,
         betAmount,
-        gameSessionId: betDetails.rows[0]?.game_session_id || null,
-        status: betDetails.rows[0]?.status || 'pending'
+        status: 'pending'
       });
       
       return {
-        betId: result.rows[0].bet_id,
-        gameSessionId: betDetails.rows[0]?.game_session_id,
-        status: betDetails.rows[0]?.status || 'pending'
+        bet_id: result.rows[0].bet_id,
+        status: 'pending'
       };
     } catch (error) {
       await client.query('ROLLBACK');
-      logger.error('BET_PLACEMENT_ERROR', {
-        service: 'aviator-backend',
-        userId,
-        betAmount,
-        error: error.message,
-        errorStack: error.stack
-      });
       throw error;
     } finally {
       client.release();
