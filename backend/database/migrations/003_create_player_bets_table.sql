@@ -23,7 +23,7 @@ DROP SEQUENCE IF EXISTS bet_id_seq;
 ALTER TABLE player_bets DROP CONSTRAINT IF EXISTS player_bets_bet_id_key;
 
 -- Create a temporary table to preserve existing data
-CREATE TEMPORARY TABLE temp_player_bets AS 
+CREATE TEMPORARY TABLE IF NOT EXISTS temp_player_bets AS 
 SELECT 
     user_id, 
     game_session_id, 
@@ -37,7 +37,7 @@ SELECT
 FROM player_bets;
 
 -- Drop the original table
-DROP TABLE player_bets;
+DROP TABLE IF EXISTS player_bets;
 
 -- Create the table with UUID bet_id
 CREATE TABLE player_bets (
@@ -45,7 +45,7 @@ CREATE TABLE player_bets (
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     game_session_id UUID NULL REFERENCES game_sessions(game_session_id) ON DELETE CASCADE,
     bet_amount DECIMAL(10, 2) NOT NULL CHECK (bet_amount >= 10),
-    cashout_multiplier JSONB,
+    cashout_multiplier DECIMAL(10, 2),
     status bet_status DEFAULT 'pending',
     payout_amount DECIMAL(10, 2) CHECK (payout_amount >= 0),
     autocashout_multiplier DECIMAL(10, 2),
@@ -54,32 +54,37 @@ CREATE TABLE player_bets (
     is_session_complete BOOLEAN DEFAULT FALSE
 );
 
--- Restore data with new bet_id sequence
-INSERT INTO player_bets (
-    user_id, 
-    game_session_id, 
-    bet_amount, 
-    cashout_multiplier, 
-    status, 
-    payout_amount, 
-    autocashout_multiplier, 
-    created_at,
-    bet_type
-)
-SELECT 
-    user_id, 
-    game_session_id, 
-    bet_amount, 
-    cashout_multiplier, 
-    status, 
-    payout_amount, 
-    autocashout_multiplier, 
-    created_at,
-    'standard' -- Default bet type for existing records
-FROM temp_player_bets;
+-- Restore data with new bet_id sequence (if temp table exists)
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'temp_player_bets') THEN
+        INSERT INTO player_bets (
+            user_id, 
+            game_session_id, 
+            bet_amount, 
+            cashout_multiplier, 
+            status, 
+            payout_amount, 
+            autocashout_multiplier, 
+            created_at,
+            bet_type
+        )
+        SELECT 
+            user_id, 
+            game_session_id, 
+            bet_amount, 
+            cashout_multiplier, 
+            status, 
+            payout_amount, 
+            autocashout_multiplier, 
+            created_at,
+            'standard' -- Default bet type for existing records
+        FROM temp_player_bets;
 
--- Drop the temporary table
-DROP TABLE temp_player_bets;
+        -- Drop the temporary table
+        DROP TABLE temp_player_bets;
+    END IF;
+END $$;
 
 -- Add indexes for performance
 CREATE INDEX IF NOT EXISTS idx_player_bets_user ON player_bets(user_id);
@@ -126,7 +131,7 @@ BEGIN
         v_current_time := CURRENT_TIMESTAMP;
         v_betting_window_end := v_session_start_time + INTERVAL '5 seconds';
 
-        -- Comprehensive bet activation
+        -- Comprehensive bet activation - includes nulls and already assigned
         UPDATE player_bets
         SET 
             status = 'active',
@@ -134,22 +139,15 @@ BEGIN
         WHERE 
             -- Activate pending bets
             status = 'pending' 
-            -- Ensure bets are for this specific game session
-            AND game_session_id IS NULL
+            -- Either unassigned OR already assigned to this session
+            AND (game_session_id IS NULL OR game_session_id = NEW.game_session_id)
             -- Include bets created before or during the 5-second window
             AND created_at <= v_betting_window_end;
-
     END IF;
     
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
--- Trigger to activate bets during betting window
-CREATE TRIGGER activate_pending_bets_on_game_start
-    AFTER UPDATE ON game_sessions
-    FOR EACH ROW
-    EXECUTE FUNCTION auto_activate_pending_bets();
 
 -- Function to enforce bet limit per user per session
 CREATE OR REPLACE FUNCTION check_user_bet_limit()
@@ -266,23 +264,36 @@ CREATE OR REPLACE FUNCTION place_bet(
 ) RETURNS UUID AS $$
 DECLARE
     v_bet_id UUID;
+    v_current_session_id UUID;
 BEGIN
-    -- Insert the bet with 'pending' status, letting the sequence generate bet_id
+    -- Find current betting session if none provided
+    IF p_game_session_id IS NULL THEN
+        SELECT game_session_id INTO v_current_session_id
+        FROM game_sessions
+        WHERE status = 'betting'
+        ORDER BY created_at DESC
+        LIMIT 1;
+    ELSE
+        v_current_session_id := p_game_session_id;
+    END IF;
+
+    -- Insert with improved error handling
     INSERT INTO player_bets (
         user_id, 
         game_session_id, 
         bet_amount, 
         status, 
-        autocashout_multiplier,
-        cashout_multiplier
+        autocashout_multiplier
     ) VALUES (
         p_user_id,
-        p_game_session_id,
+        v_current_session_id,
         p_bet_amount,
         'pending',
-        p_autocashout_multiplier,
-        p_cashout_multiplier
+        p_autocashout_multiplier
     ) RETURNING bet_id INTO v_bet_id;
+    
+    -- Log success
+    RAISE NOTICE 'Bet placed: ID=%, User=%, Session=%', v_bet_id, p_user_id, v_current_session_id;
     
     RETURN v_bet_id;
 END;
@@ -304,6 +315,7 @@ BEGIN
     SELECT game_session_id INTO v_game_session_id 
     FROM game_sessions 
     WHERE status = 'in_progress' 
+    ORDER BY created_at DESC
     LIMIT 1;
 
     -- If no in_progress session exists, raise an exception
@@ -316,22 +328,22 @@ BEGIN
     SET 
         game_session_id = v_game_session_id,
         status = 'active'
-    WHERE game_session_id IS NULL 
-      AND status = 'pending';
+    WHERE status = 'pending'
+      AND (game_session_id IS NULL OR game_session_id = v_game_session_id);
 
     GET DIAGNOSTICS v_activated_count = ROW_COUNT;
 
     -- Return activated bets for Redis push
     RETURN QUERY 
     SELECT 
-        bet_id, 
-        user_id, 
-        bet_amount, 
-        COALESCE(autocashout_multiplier, 0) AS autocashout_multiplier,
+        pb.bet_id, 
+        pb.user_id, 
+        pb.bet_amount, 
+        COALESCE(pb.autocashout_multiplier, 0) AS autocashout_multiplier,
         v_game_session_id
-    FROM player_bets
-    WHERE game_session_id = v_game_session_id
-      AND status = 'active';
+    FROM player_bets pb
+    WHERE pb.game_session_id = v_game_session_id
+      AND pb.status = 'active';
 END;
 $$ LANGUAGE plpgsql;
 
@@ -365,7 +377,7 @@ BEGIN
             END,
             payout_amount = CASE
                 WHEN payout_amount > 0 THEN payout_amount
-                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier >= v_crash_point
+                WHEN cashout_multiplier IS NOT NULL AND cashout_multiplier <= v_crash_point
                 THEN bet_amount * cashout_multiplier
                 WHEN autocashout_multiplier IS NOT NULL AND v_crash_point >= autocashout_multiplier
                 THEN bet_amount * autocashout_multiplier
@@ -384,8 +396,50 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER resolve_active_bets_on_game_end
     AFTER UPDATE ON game_sessions
     FOR EACH ROW
+    WHEN (OLD.status = 'in_progress' AND NEW.status = 'completed')
     EXECUTE FUNCTION auto_resolve_active_bets();
 
 -- Remove the update_player_bets_modtime trigger and function
 DROP TRIGGER IF EXISTS update_player_bets_modtime ON player_bets;
 DROP FUNCTION IF EXISTS update_player_bets_modtime();
+
+-- Trigger to assign pending bets to new game sessions
+CREATE OR REPLACE FUNCTION assign_pending_bets_to_new_session() 
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Only execute when a new game session is created with 'betting' status
+    IF NEW.status = 'betting' THEN
+        -- Assign all pending bets without a session to this new session
+        UPDATE player_bets
+        SET game_session_id = NEW.game_session_id
+        WHERE 
+            status = 'pending' 
+            AND game_session_id IS NULL;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Debug trigger function to log when each trigger fires
+CREATE OR REPLACE FUNCTION log_trigger_execution() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE NOTICE 'Trigger % executed on % for row %', TG_NAME, TG_TABLE_NAME, NEW;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Remove triggers that monitor game_sessions from the player_bets file
+DROP TRIGGER IF EXISTS activate_pending_bets_on_game_start ON game_sessions;
+DROP TRIGGER IF EXISTS assign_pending_bets_on_session_create ON game_sessions;
+DROP TRIGGER IF EXISTS debug_assign_pending_bets ON game_sessions;
+DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
+
+-- First check what columns actually exist
+SELECT column_name 
+FROM information_schema.columns 
+WHERE table_name = 'player_bets';
+
+-- Then add the missing column if needed
+ALTER TABLE player_bets 
+ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(user_id) ON DELETE CASCADE;

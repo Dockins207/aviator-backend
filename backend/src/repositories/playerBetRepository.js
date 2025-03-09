@@ -14,67 +14,9 @@ export default class PlayerBetRepository {
     payoutAmount = null,
     betType = 'standard'
   }) {
-    const client = await pool.connect();
-
-    try {
-      await client.query('BEGIN');
-
-      // Validate user wallet balance
-      const walletResult = await client.query(
-        'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
-        [userId]
-      );
-
-      if (walletResult.rows.length === 0 || walletResult.rows[0].balance < betAmount) {
-        throw new Error('Insufficient balance');
-      }
-
-      // Deduct bet amount from wallet
-      await client.query(
-        'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
-        [betAmount, userId]
-      );
-
-      // Insert bet record - always set game_session_id to null to allow activation
-      const betResult = await client.query(
-        `INSERT INTO player_bets 
-        (user_id, bet_amount, cashout_multiplier, 
-         autocashout_multiplier, payout_amount, bet_type) 
-        VALUES ($1, $2, $3, $4, $5, $6) 
-        RETURNING bet_id, game_session_id`,
-        [
-          userId, 
-          betAmount, 
-          cashoutMultiplier, 
-          autocashoutMultiplier, 
-          payoutAmount,
-          betType
-        ]
-      );
-
-      const betId = betResult.rows[0].bet_id;
-      const gameSessionId = betResult.rows[0].game_session_id;
-
-      await client.query('COMMIT');
-
-      return {
-        bet_id: betId,
-        game_session_id: gameSessionId,
-        bet_amount: betAmount,
-        status: 'pending'
-      };
-
-    } catch (error) {
-      await client.query('ROLLBACK');
-      logger.error('BET_PLACEMENT_ERROR', {
-        userId,
-        betAmount,
-        error: error.message
-      });
-      throw error;
-    } finally {
-      client.release();
-    }
+    // Create an instance and use the instance method
+    const repository = new PlayerBetRepository();
+    return repository.placeBet(userId, betAmount, autocashoutMultiplier, betType);
   }
 
   // Prevent any direct database interactions
@@ -694,5 +636,84 @@ export default class PlayerBetRepository {
   static async addToActiveBets() {
     // No-op method to prevent errors if called elsewhere
     return;
+  }
+
+  /**
+   * Place a bet for a user
+   * This version uses the database function to handle game session assignment
+   */
+  async placeBet(userId, betAmount, autoCashoutMultiplier = null, betType = 'standard') {
+    const client = await this.pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // First validate wallet balance
+      const walletResult = await client.query(
+        'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+        [userId]
+      );
+
+      if (walletResult.rows.length === 0 || walletResult.rows[0].balance < betAmount) {
+        throw new Error('Insufficient balance');
+      }
+
+      // Deduct bet amount from wallet
+      await client.query(
+        'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+        [betAmount, userId]
+      );
+      
+      // Call the database function - this will handle game session assignment via triggers
+      const query = `
+        SELECT place_bet($1, $2, NULL, $3) as bet_id
+      `;
+      
+      const result = await client.query(query, [
+        userId, 
+        betAmount, 
+        autoCashoutMultiplier
+      ]);
+      
+      if (!result.rows[0]?.bet_id) {
+        throw new Error('Failed to create bet');
+      }
+
+      // Get the created bet with game session info
+      const betDetails = await client.query(
+        `SELECT bet_id, game_session_id, status 
+         FROM player_bets WHERE bet_id = $1`,
+        [result.rows[0].bet_id]
+      );
+      
+      await client.query('COMMIT');
+      
+      logger.info('BET_PLACED', {
+        service: 'aviator-backend',
+        betId: result.rows[0].bet_id,
+        userId,
+        betAmount,
+        gameSessionId: betDetails.rows[0]?.game_session_id || null,
+        status: betDetails.rows[0]?.status || 'pending'
+      });
+      
+      return {
+        betId: result.rows[0].bet_id,
+        gameSessionId: betDetails.rows[0]?.game_session_id,
+        status: betDetails.rows[0]?.status || 'pending'
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('BET_PLACEMENT_ERROR', {
+        service: 'aviator-backend',
+        userId,
+        betAmount,
+        error: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

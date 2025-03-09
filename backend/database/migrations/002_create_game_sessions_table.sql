@@ -8,6 +8,9 @@ BEGIN
     DROP FUNCTION IF EXISTS cleanup_old_game_records() CASCADE;
     DROP FUNCTION IF EXISTS mark_game_session_complete(UUID, numeric) CASCADE;
     DROP FUNCTION IF EXISTS manage_game_session_status() CASCADE;
+    DROP FUNCTION IF EXISTS auto_activate_pending_bets() CASCADE;
+    DROP FUNCTION IF EXISTS assign_pending_bets_to_new_session() CASCADE;
+    DROP FUNCTION IF EXISTS log_trigger_execution() CASCADE;
     
     -- Drop tables and related objects
     DROP TABLE IF EXISTS game_sessions CASCADE;
@@ -43,10 +46,6 @@ CREATE TABLE game_sessions (
     CONSTRAINT chk_total_bet_amount_non_negative CHECK (total_bet_amount >= 0)
 );
 
--- Execute this in your PostgreSQL database
-ALTER TABLE game_sessions 
-ALTER COLUMN crash_point TYPE numeric(5,2) USING (crash_point::text::numeric);
-
 -- Create indexes
 DO $$
 BEGIN
@@ -63,30 +62,20 @@ BEGIN
     END IF;
 END $$;
 
--- Create status management trigger function
-CREATE OR REPLACE FUNCTION manage_game_session_status() 
-RETURNS TRIGGER AS $$
+-- Create cleanup function
+CREATE OR REPLACE FUNCTION cleanup_old_game_records()
+RETURNS void AS $$
+DECLARE
+    retention_days INTEGER := 90;
 BEGIN
-    -- Ensure we're using the correct enum type
-    NEW.status := NEW.status::game_status;
+    DELETE FROM game_sessions 
+    WHERE created_at < NOW() - INTERVAL '90 days';
 
-    -- Set ended_at when game is completed
-    IF NEW.status = 'completed'::game_status AND NEW.crash_point IS NOT NULL THEN
-        NEW.ended_at := CURRENT_TIMESTAMP;
-    END IF;
-
-    RETURN NEW;
+    -- Note: player_bets cleanup is handled by foreign key constraints
 END;
 $$ LANGUAGE plpgsql;
 
--- Create status management trigger
-DROP TRIGGER IF EXISTS game_session_status_transition ON game_sessions;
-CREATE TRIGGER game_session_status_transition 
-    BEFORE UPDATE ON game_sessions 
-    FOR EACH ROW 
-    EXECUTE FUNCTION manage_game_session_status();
-
--- Create completion function
+-- Mark game session complete function
 CREATE OR REPLACE FUNCTION mark_game_session_complete(
     p_game_session_id UUID,
     p_crash_point numeric(5,2)
@@ -102,20 +91,90 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Create cleanup function
-CREATE OR REPLACE FUNCTION cleanup_old_game_records()
-RETURNS void AS $$
-DECLARE
-    retention_days INTEGER := 90;
+-- Debug trigger function to log when each trigger fires
+CREATE OR REPLACE FUNCTION log_trigger_execution() RETURNS TRIGGER AS $$
 BEGIN
-    DELETE FROM game_sessions 
-    WHERE created_at < NOW() - INTERVAL '90 days';
-
-    -- Note: player_bets cleanup is handled by foreign key constraints
+    RAISE NOTICE 'Trigger % executed on % for row %', TG_NAME, TG_TABLE_NAME, NEW;
+    RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
--- Check column data type
-SELECT column_name, data_type 
-FROM information_schema.columns 
-WHERE table_name = 'game_sessions' AND column_name = 'crash_point';
+-- Function to activate pending bets when game transitions to in_progress
+CREATE OR REPLACE FUNCTION auto_activate_pending_bets() RETURNS TRIGGER AS $$
+DECLARE
+    v_session_start_time TIMESTAMP WITH TIME ZONE;
+    v_betting_window_end TIMESTAMP WITH TIME ZONE;
+    v_current_time TIMESTAMP WITH TIME ZONE;
+BEGIN
+    -- Ensure we're transitioning from betting to in_progress
+    IF NEW.status = 'in_progress' AND OLD.status = 'betting' THEN
+        -- Calculate betting window
+        v_session_start_time := OLD.created_at;
+        v_current_time := CURRENT_TIMESTAMP;
+        v_betting_window_end := v_session_start_time + INTERVAL '5 seconds';
+
+        -- Comprehensive bet activation - includes nulls and already assigned
+        UPDATE player_bets
+        SET 
+            status = 'active',
+            game_session_id = NEW.game_session_id
+        WHERE 
+            -- Activate pending bets
+            status = 'pending' 
+            -- Either unassigned OR already assigned to this session
+            AND (game_session_id IS NULL OR game_session_id = NEW.game_session_id)
+            -- Include bets created before or during the 5-second window
+            AND created_at <= v_betting_window_end;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to assign pending bets to new game sessions
+CREATE OR REPLACE FUNCTION assign_pending_bets_to_new_session() 
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Only execute when a new game session is created with 'betting' status
+    IF NEW.status = 'betting' THEN
+        -- Assign all pending bets without a session to this new session
+        UPDATE player_bets
+        SET game_session_id = NEW.game_session_id
+        WHERE 
+            status = 'pending' 
+            AND game_session_id IS NULL;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Remove any existing triggers to avoid duplication
+DROP TRIGGER IF EXISTS assign_pending_bets_trigger ON game_sessions;
+DROP TRIGGER IF EXISTS activate_pending_bets_trigger ON game_sessions;
+DROP TRIGGER IF EXISTS debug_assign_pending_bets ON game_sessions;
+DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
+
+-- Create triggers on game_sessions table
+CREATE TRIGGER assign_pending_bets_trigger
+    AFTER INSERT ON game_sessions
+    FOR EACH ROW
+    WHEN (NEW.status = 'betting')
+    EXECUTE FUNCTION assign_pending_bets_to_new_session();
+
+CREATE TRIGGER activate_pending_bets_trigger
+    AFTER UPDATE ON game_sessions
+    FOR EACH ROW
+    WHEN (OLD.status = 'betting' AND NEW.status = 'in_progress')
+    EXECUTE FUNCTION auto_activate_pending_bets();
+
+CREATE TRIGGER debug_assign_pending_bets
+    AFTER INSERT ON game_sessions
+    FOR EACH ROW
+    EXECUTE FUNCTION log_trigger_execution();
+    
+CREATE TRIGGER debug_activate_pending_bets
+    AFTER UPDATE ON game_sessions
+    FOR EACH ROW 
+    WHEN (OLD.status = 'betting' AND NEW.status = 'in_progress')
+    EXECUTE FUNCTION log_trigger_execution();
