@@ -278,58 +278,29 @@ class GameRepository {
    * @returns {Promise<Object>} Updated game session
    */
   async markGameSessionComplete(gameSessionId, crashPoint) {
-    // Type conversion for crash point
-    if (typeof crashPoint === 'string') {
-      crashPoint = parseFloat(crashPoint);
+    if (typeof crashPoint !== 'number' || isNaN(crashPoint) || crashPoint <= 0) {
+      logger.error('INVALID_CRASH_POINT', { 
+        gameSessionId, 
+        crashPoint,
+        crashPointType: typeof crashPoint
+      });
+      // Ensure a valid value even in error cases
+      crashPoint = parseFloat(crashPoint) || 1.00;
     }
 
-    // Validate crash point value
-    if (isNaN(crashPoint) || crashPoint <= 0) {
-      const error = new Error('Invalid crash point value');
-      logger.error('GAME_SESSION_COMPLETE_ERROR', { 
-        service: 'aviator-backend',
-        gameSessionId,
-        error: error.message,
-        crashPoint
-      });
-      throw error;
-    }
+    // Force to numeric with 2 decimal places
+    crashPoint = parseFloat(crashPoint.toFixed(2));
+    
+    logger.info('MARKING_SESSION_COMPLETE', {
+      gameSessionId,
+      crashPoint
+    });
 
     const client = await this.pool.connect();
+    
     try {
       await client.query('BEGIN');
 
-      // First check if the game session exists and is in the correct state
-      const checkQuery = `
-        SELECT status 
-        FROM game_sessions 
-        WHERE game_session_id = $1
-      `;
-      
-      const checkResult = await client.query(checkQuery, [gameSessionId]);
-      
-      if (checkResult.rows.length === 0) {
-        logger.warn('GAME_SESSION_NOT_FOUND', { 
-          service: 'aviator-backend',
-          gameSessionId
-        });
-        throw new Error(`No game session found with ID: ${gameSessionId}`);
-      }
-      
-      const currentStatus = checkResult.rows[0].status;
-      
-      // Only allow updating if the current status is 'in_progress'
-      if (currentStatus !== 'in_progress') {
-        logger.warn('GAME_SESSION_INVALID_STATUS', { 
-          service: 'aviator-backend',
-          gameSessionId,
-          currentStatus,
-          requiredStatus: 'in_progress'
-        });
-        throw new Error(`Game session ${gameSessionId} is already in ${currentStatus} status`);
-      }
-
-      // Update game session status to completed
       const updateQuery = `
         UPDATE game_sessions 
         SET 
@@ -346,7 +317,6 @@ class GameRepository {
 
       if (result.rows.length === 0) {
         logger.warn('GAME_SESSION_UPDATE_FAILED', { 
-          service: 'aviator-backend',
           gameSessionId,
           crashPoint
         });
@@ -354,17 +324,18 @@ class GameRepository {
       }
 
       await client.query('COMMIT');
+      
       logger.info('GAME_SESSION_COMPLETE_SUCCESS', { 
-        service: 'aviator-backend',
         gameSessionId, 
-        crashPoint: result.rows[0].crash_point,
+        savedCrashPoint: result.rows[0].crash_point,
+        requestedCrashPoint: crashPoint,
         status: result.rows[0].status
       });
+      
       return result.rows[0];
     } catch (error) {
       await client.query('ROLLBACK');
       logger.error('GAME_SESSION_COMPLETE_ERROR', { 
-        service: 'aviator-backend',
         gameSessionId, 
         error: error.message,
         errorStack: error.stack
@@ -406,6 +377,92 @@ class GameRepository {
         error: error.message
       });
       throw error;
+    }
+  }
+
+  // Add this method to handle game session creation with locking
+  static async createGameSessionWithLock(gameType = 'aviator', initialStatus = 'betting') {
+    const repository = new GameRepository();
+    const client = await repository.pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // First complete any existing active sessions
+      const cleanupResult = await client.query(`
+        UPDATE game_sessions 
+        SET 
+          status = 'completed', 
+          crash_point = 1.00,
+          ended_at = CURRENT_TIMESTAMP
+        WHERE 
+          status IN ('betting', 'in_progress')
+        RETURNING game_session_id
+      `);
+      
+      if (cleanupResult.rows.length > 0) {
+        logger.warn('CLEANED_UP_EXISTING_ACTIVE_SESSIONS', {
+          service: 'aviator-backend',
+          sessionIds: cleanupResult.rows.map(row => row.game_session_id)
+        });
+        
+        // Add a small delay to ensure the cleanup is propagated
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      // Use advisory lock to prevent race conditions
+      const lockResult = await client.query('SELECT pg_try_advisory_xact_lock(42)');
+      const lockAcquired = lockResult.rows[0].pg_try_advisory_xact_lock;
+      
+      if (!lockAcquired) {
+        logger.warn('FAILED_TO_ACQUIRE_SESSION_LOCK', {
+          service: 'aviator-backend'
+        });
+        throw new Error('Could not acquire lock for session creation');
+      }
+      
+      // Double-check there are no active sessions after lock acquired
+      const checkResult = await client.query(`
+        SELECT COUNT(*) as count FROM game_sessions 
+        WHERE status IN ('betting', 'in_progress')
+      `);
+      
+      if (parseInt(checkResult.rows[0].count) > 0) {
+        logger.error('RACE_CONDITION_MULTIPLE_SESSIONS_DETECTED', {
+          service: 'aviator-backend',
+          count: parseInt(checkResult.rows[0].count)
+        });
+        throw new Error('Race condition detected - active sessions still exist');
+      }
+      
+      // Create the new session
+      const query = `
+        INSERT INTO game_sessions 
+        (game_type, status)
+        VALUES ($1, $2)
+        RETURNING *
+      `;
+      
+      const result = await client.query(query, [gameType, initialStatus]);
+      
+      await client.query('COMMIT');
+      
+      logger.info('GAME_SESSION_CREATED_WITH_LOCK', {
+        service: 'aviator-backend',
+        gameSessionId: result.rows[0].game_session_id
+      });
+      
+      return result.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('GAME_SESSION_CREATION_ERROR', {
+        service: 'aviator-backend',
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+      throw error;
+    } finally {
+      client.release();
     }
   }
 }

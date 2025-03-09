@@ -2,6 +2,9 @@ import winston from 'winston';
 import 'winston-daily-rotate-file';
 import path from 'path';
 
+// Add this near the top of your logger configuration
+const MIN_LOG_LEVEL = process.env.NODE_ENV === 'production' ? 'info' : 'debug';
+
 // Log tracking to prevent duplicate logs
 const _logTracker = {
   socketAuth: new Set(),
@@ -192,9 +195,22 @@ const fileTransport = new winston.transports.DailyRotateFile({
 });
 
 const logger = winston.createLogger({
-  level: 'debug', // Force debug logging
+  level: MIN_LOG_LEVEL,
   format: winston.format.combine(
     logFilter(),
+    // Updated filter to also exclude MULTIPLIER_MILESTONE logs
+    winston.format((info) => {
+      // Skip broadcast logs AND multiplier milestone logs
+      if (info.message === 'BROADCASTING_GAME_STATE' || 
+          info.message?.includes('broadcast') ||
+          info.message?.includes('BROADCAST') ||
+          info.message === 'MULTIPLIER_MILESTONE' ||  // Added this condition
+          (info.state === 'flying' && info.multiplier)) {
+        return false; // Skip this log
+      }
+      return info;
+    })(),
+    winston.format.timestamp(),
     winston.format.json()
   ),
   defaultMeta: { service: 'aviator-backend' },
@@ -215,6 +231,29 @@ const logger = winston.createLogger({
     })
   ]
 });
+
+// Add this block to completely disable MULTIPLIER_MILESTONE logs
+// Add directly after the logger declaration but before exporting
+
+// Monkey patch the info method to specifically block MULTIPLIER_MILESTONE logs
+const originalInfo = logger.info;
+logger.info = function(message, ...args) {
+  // Block specific log types regardless of any filters
+  if (message === 'MULTIPLIER_MILESTONE' || 
+      (typeof message === 'object' && message?.message === 'MULTIPLIER_MILESTONE')) {
+    return; // Completely block these logs
+  }
+  
+  // Also block broadcast state changes during flying phase
+  if (message === 'BROADCASTING_GAME_STATE' ||
+      message?.includes('broadcast') ||
+      message?.includes('BROADCAST')) {
+    return; // Completely block these logs
+  }
+  
+  // Call original method for everything else
+  return originalInfo.call(this, message, ...args);
+};
 
 // Extend logger with additional methods
 logger.serverInfo = (message, metadata = {}) => {

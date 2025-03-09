@@ -111,70 +111,66 @@ class GameBoardService extends EventEmitter {
     }
   }
 
-  // Enhanced game cycle with Redis metrics
+  // REPLACE startGameCycle method
   async startGameCycle() {
-    // Prevent multiple game cycles from running simultaneously
-    if (this.gameLoopActive) {
-      return; 
+    // Check if a cycle is already running
+    if (this._cycleInProgress === true) {
+      logger.warn('GAME_CYCLE_ALREADY_RUNNING', {
+        service: 'aviator-backend'
+      });
+      return;
     }
-
-    this.gameLoopActive = true;
-
+    
+    // Set flag to indicate cycle is in progress
+    this._cycleInProgress = true;
+    
     try {
-      while (this.gameLoopActive) {
-        // Reset game state to preparing
-        this.resetGameState();
+      // Reset state and clear intervals
+      this.resetGameState();
+      
+      // Use the enhanced method with locking instead
+      const gameSession = await GameRepository.createGameSessionWithLock('aviator', 'betting');
+      
+      // Set game state
+      this.gameState.gameId = gameSession.game_session_id;
+      this.gameState.status = 'betting';
+      this.gameState.crashPoint = this.generateCrashPoint();
+      
+      logger.info('NEW_GAME_CYCLE_STARTED', {
+        service: 'aviator-backend',
+        gameId: gameSession.game_session_id,
+        initialStatus: 'betting',
+        crashPoint: this.gameState.crashPoint
+      });
 
-        // Create a database game session with initial 'betting' status
-        const gameSession = await GameRepository.createGameSession('aviator', 'betting');
-        
-        // Initialize game state
-        this.gameState = {
-          gameId: gameSession.game_session_id,  // Use database game session ID
-          status: 'betting',
-          startTime: Date.now(),
-          multiplier: 1.00,
-          crashPoint: this.generateCrashPoint(),
-          players: [],  
-          countdown: 5,  
-          activeBets: []
-        };
-
-        // Betting phase
-        await this.runBettingPhase();
-        
-        // Update database session status before flying phase starts
-        await GameRepository.updateGameSessionStatus(this.gameState.gameId, 'in_progress');
-
-        // Flying phase
-        try {
-          await this.runFlyingPhase();
-        } catch (flyingError) {
-          logger.error('Error during flying phase', {
-            errorMessage: flyingError.message,
-            errorStack: flyingError.stack
-          });
-        }
-
-        // Crashed state pause
-        this.gameState.state = 'crashed';
-        // Pause for 4 seconds in crashed state
-        await new Promise(resolve => setTimeout(resolve, 4000));
-
-        // Optional: Add additional pause between game cycles if configured
-        if (this.pauseBetweenGames) {
-          await new Promise(resolve => setTimeout(resolve, gameConfig.PAUSE_BETWEEN_GAMES || 3000));
-        }
-      }
+      // 1. Run betting phase with countdown
+      await this.runBettingPhase();
+      
+      // 2. Update database game session status to in_progress
+      await GameRepository.updateGameSessionStatus(this.gameState.gameId, 'in_progress');
+      
+      // 3. Run flying phase (crash happens inside this phase)
+      await this.runFlyingPhase();
+      
+      // 4. Run crashed phase to show results (3 seconds)
+      await this.runCrashedPhase();
+      
+      // 5. Wait before starting next game (smooth transition)
+      await new Promise(resolve => setTimeout(resolve, 3000));
     } catch (error) {
-      logger.error('Game cycle failed', {
+      logger.error('GAME_CYCLE_FAILED', {
+        service: 'aviator-backend',
         errorMessage: error.message,
         errorStack: error.stack
       });
+    } finally {
+      // Reset the cycle flag regardless of success/failure
+      this._cycleInProgress = false;
       
-      // Reset game state and loop active flag
-      this.gameLoopActive = false;
-      this.resetGameState();
+      // Schedule next game cycle with a delay
+      setTimeout(() => {
+        this.startGameCycle();
+      }, 1000);
     }
   }
 
@@ -194,61 +190,47 @@ class GameBoardService extends EventEmitter {
     }
   }
 
-  // Start betting phase with 5-second countdown
+  // REPLACE runBettingPhase method
   async runBettingPhase() {
     try {
-      // Set betting state
+      // Clear any existing countdown interval
+      if (this.countdownInterval) {
+        clearInterval(this.countdownInterval);
+        this.countdownInterval = null;
+      }
+      
+      // Reset and set betting state
       this.gameState.status = 'betting';
       this.gameState.countdown = 5;
+      this.gameState.multiplier = 1.00; // Reset multiplier
 
-      // Place bets for each player
-      this.gameState.players = this.gameState.players.map(player => {
-        try {
-          // Use placeBet for each player
-          const placedBet = {
-            userId: player.userId,
-            betAmount: player.betAmount,
-            gameSessionId: this.gameState.gameId
-          };
-          return placedBet;
-        } catch (error) {
-          logger.error('BET_PLACEMENT_ERROR', {
-            userId: player.userId,
-            errorMessage: error.message
-          });
-          return null;
-        }
-      }).filter(bet => bet !== null);
+      // Send initial state to clients
+      socketService.broadcastGameStateChange({
+        gameId: this.gameState.gameId,
+        state: 'betting',
+        countdown: 5,
+        timestamp: new Date().toISOString()
+      });
 
       return new Promise((resolve) => {
-        this.countdownInterval = setInterval(async () => {
-          // Decrease countdown
-          this.gameState.countdown--;
+        let secondsLeft = 5;
+        
+        this.countdownInterval = setInterval(() => {
+          secondsLeft--;
+          this.gameState.countdown = secondsLeft;
+          
+          // Broadcast countdown update
+          socketService.broadcastGameStateChange({
+            gameId: this.gameState.gameId,
+            state: 'betting',
+            countdown: secondsLeft,
+            timestamp: new Date().toISOString()
+          });
 
-          // When countdown reaches 0, activate all bets and resolve
-          if (this.gameState.countdown <= 0) {
+          // When countdown reaches 0, resolve
+          if (secondsLeft <= 0) {
             clearInterval(this.countdownInterval);
-            
-            try {
-              // Bets are automatically activated by database trigger
-              // Just update the game state to reflect this
-              this.gameState.status = 'flying';
-              
-              logger.info('GAME_STATE_CHANGED', {
-                gameId: this.gameState.gameId,
-                previousStatus: 'betting',
-                newStatus: 'flying'
-              });
-
-            } catch (error) {
-              logger.error('GAME_STATE_CHANGE_ERROR', {
-                service: 'aviator-backend',
-                gameId: this.gameState.gameId,
-                error: error.message,
-                stack: error.stack
-              });
-            }
-            
+            this.countdownInterval = null;
             resolve();
           }
         }, 1000);
@@ -263,18 +245,31 @@ class GameBoardService extends EventEmitter {
     }
   }
 
-  // Start flying phase with multiplier progression
+  // REPLACE runFlyingPhase method
   async runFlyingPhase() {
     try {
-      // Set initial state
+      // Update game state to flying
       this.gameState.status = 'flying';
       this.gameState.startTime = Date.now();
       this.gameState.multiplier = 1.00;
       this.gameState.lastUpdateTime = Date.now();
+      
+      // Log initial state change (important)
+      logger.info('GAME_FLYING_PHASE_STARTED', {
+        gameId: this.gameState.gameId,
+        initialMultiplier: 1.00
+      });
+      
+      // Broadcast initial flying state
+      this.updateGameStateAndNotify({
+        status: 'flying',
+        multiplier: 1.00
+      });
 
-      // Start multiplier calculation
       return new Promise((resolve) => {
-        this.multiplierInterval = setInterval(async () => {
+        // Reduce the update frequency here if needed
+        // 50ms is fine for smooth client updates, but we can log less frequently
+        this.multiplierInterval = setInterval(() => {
           const currentTime = Date.now();
           const timeDiff = currentTime - this.gameState.lastUpdateTime;
           
@@ -283,21 +278,19 @@ class GameBoardService extends EventEmitter {
           this.gameState.multiplier = parseFloat((this.gameState.multiplier + increment).toFixed(2));
           this.gameState.lastUpdateTime = currentTime;
 
-          // Emit state change with current multiplier
-          this.emit('stateChange', {
-            gameId: this.gameState.gameId,
-            status: 'flying',
-            multiplier: this.gameState.multiplier,
-            timestamp: currentTime
+          // REMOVE ALL MULTIPLIER LOGGING - do not log milestones at all
+          // Simply update clients without any logging
+          this.updateGameStateAndNotify({
+            multiplier: this.gameState.multiplier
           });
 
           // Check for crash
           if (this.gameState.multiplier >= this.gameState.crashPoint) {
             clearInterval(this.multiplierInterval);
-            await this.handleGameCrash();
-            resolve();
+            this.multiplierInterval = null;
+            this.handleGameCrash().then(resolve);
           }
-        }, 50); // Update more frequently for smoother animation
+        }, 50);
       });
     } catch (error) {
       logger.error('Error during flying phase', {
@@ -310,105 +303,132 @@ class GameBoardService extends EventEmitter {
   }
 
   async runCrashedPhase() {
-    try {
-      // Update game state to crashed
-      this.gameState.status = 'crashed';
-      
-      // Emit state change for bet service to handle button states
-      this.emit('stateChange', this.gameState);
-
-      // Process crashed phase logic
-      await this.processCrashedPhase();
-    } catch (error) {
-      logger.error('Error in runCrashedPhase', {
-        errorMessage: error.message,
-        errorStack: error.stack
-      });
-    }
-  }
-
-  async handleGameCrash() {
-    // Validate game state
-    if (!this.gameState || !this.gameState.gameId) {
-      logger.error('INVALID_GAME_STATE_FOR_CRASH', {
-        gameState: this.gameState,
+  try {
+    // Set crashed state
+    this.gameState.status = 'crashed';
+    
+    // Log at an appropriate level
+    logger.info('GAME_CRASHED_PHASE', {
+      gameId: this.gameState.gameId,
+      crashPoint: this.gameState.multiplier.toFixed(2)
+    });
+    
+    // Notify clients
+    if (socketService) {
+      socketService.broadcastGameStateChange({
+        gameId: this.gameState.gameId,
+        state: 'crashed',
+        crashPoint: this.gameState.multiplier.toFixed(2),
         timestamp: new Date().toISOString()
       });
-      return null;
     }
+    
+    // Wait for display duration
+    return new Promise(resolve => {
+      // Wait 3 seconds in crashed state before continuing
+      setTimeout(() => {
+        resolve();
+      }, 3000);
+    });
+  } catch (error) {
+    logger.error('Error in runCrashedPhase', {
+      service: 'aviator-backend',
+      errorMessage: error.message,
+      errorStack: error.stack
+    });
+    // Still resolve so the game cycle can continue
+    return Promise.resolve();
+  }
+}
 
-    // Capture the exact crash point as a string with 2 decimal places
-    const crashPoint = this.gameState.crashPoint.toFixed(2);
+// Fix the handleGameCrash method to ensure accurate crash points are saved
+async handleGameCrash() {
+  // Validate game state
+  if (!this.gameState || !this.gameState.gameId) {
+    logger.error('INVALID_GAME_STATE_FOR_CRASH', {
+      gameState: this.gameState,
+      timestamp: new Date().toISOString()
+    });
+    return null;
+  }
 
+  try {
+    // IMPORTANT: Use the CURRENT multiplier value as the crash point
+    // NOT the predefined crashPoint value
+    const finalMultiplier = parseFloat(this.gameState.multiplier.toFixed(2));
+    
+    // Log the crash point values to debug
+    logger.info('CRASH_POINT_DEBUG', {
+      gameId: this.gameState.gameId,
+      currentMultiplier: finalMultiplier,
+      original_crashPoint: this.gameState.crashPoint
+    });
+    
     // Update game state to crashed
     this.gameState.status = 'crashed';
     this.gameState.crashTimestamp = new Date().toISOString();
-
-    // Finalize all active bets as expired
-    this.gameState.players.forEach(bet => {
-      // Finalize bet directly
-      const finalizedBet = {
-        betId: bet.betId,
-        status: 'expired',
-        payoutMultiplier: Number(crashPoint)
-      };
+    
+    // CRITICAL FIX: Directly update the database with the crash point
+    const result = await GameRepository.markGameSessionComplete(
+      this.gameState.gameId,
+      finalMultiplier
+    );
+    
+    // Double-check that the database update was successful
+    const gameRepo = new GameRepository();
+    const verifyResult = await gameRepo.pool.query(
+      'SELECT crash_point FROM game_sessions WHERE game_session_id = $1',
+      [this.gameState.gameId]
+    );
+    
+    logger.info('CRASH_POINT_VERIFICATION', {
+      gameId: this.gameState.gameId,
+      savedCrashPoint: verifyResult.rows[0]?.crash_point,
+      requestedCrashPoint: finalMultiplier
     });
-
-    // Mark game session as complete in the database
-    try {
-      // Create a new repository instance
-      const gameRepo = new GameRepository();
-
-      // Log the entire completionDetails object before passing it to markGameSessionComplete
-      const completionDetails = {
-        crash_point: Number(this.gameState.crashPoint.toFixed(2))
-      };
-      logger.info('Preparing to mark game session complete', {
-        gameSessionId: this.gameState.gameId,
-        completionDetails
-      });
-
-      // Convert crashPoint to a number before passing it to markGameSessionComplete
-      const completedSession = await gameRepo.markGameSessionComplete(
-        this.gameState.gameId,
-        Number(this.gameState.crashPoint)
-      );
-
-      // Removed verbose logging
-      // console.log('Game session completion result:', completedSession);
-    } catch (error) {
-      logger.error('GAME_SESSION_COMPLETE_ERROR', {
-        gameId: this.gameState.gameId,
-        errorMessage: error.message,
-        errorStack: error.stack,
-        crashPoint
-      });
-    }
-
+    
     // Broadcast crash event with precise multiplier
     if (socketService) {
       socketService.broadcastGameStateChange({
         gameId: this.gameState.gameId,
         state: 'crashed',
-        crashPoint: crashPoint,
+        crashPoint: finalMultiplier,
         timestamp: this.gameState.crashTimestamp
       }, true);
     }
-
-    // Log crash details
-    logger.warn('GAME_CRASHED', {
-      gameId: this.gameState.gameId,
-      crashPoint: crashPoint,
-      timestamp: this.gameState.crashTimestamp,
-      totalPlayers: this.gameState.players.length
-    });
-
+    
     return {
       gameId: this.gameState.gameId,
-      crashPoint: crashPoint,
+      crashPoint: finalMultiplier,
       timestamp: this.gameState.crashTimestamp
     };
+  } catch (error) {
+    logger.error('GAME_SESSION_COMPLETE_ERROR', {
+      gameId: this.gameState.gameId,
+      errorMessage: error.message,
+      errorStack: error.stack
+    });
+    
+    // FALLBACK: Try direct update if the repository method fails
+    try {
+      const finalMultiplier = parseFloat(this.gameState.multiplier.toFixed(2));
+      const gameRepo = new GameRepository();
+      await gameRepo.pool.query(
+        `UPDATE game_sessions 
+         SET status = 'completed', crash_point = $1, ended_at = CURRENT_TIMESTAMP 
+         WHERE game_session_id = $2`,
+        [finalMultiplier, this.gameState.gameId]
+      );
+    } catch (fallbackError) {
+      logger.error('FALLBACK_UPDATE_FAILED', {
+        gameId: this.gameState.gameId,
+        errorMessage: fallbackError.message
+      });
+    }
+    
+    return null;
   }
+}
 
   // Get current game state
   getCurrentGameState() {
@@ -752,24 +772,48 @@ class GameBoardService extends EventEmitter {
     }
   }
 
-  // Update game state and notify listeners
-  updateGameState(newState) {
-    try {
-      // Update the state
-      this.gameState = {
-        ...this.gameState,
+  // Replace the updateGameStateAndNotify method to reduce log frequency
+  updateGameStateAndNotify(newState) {
+    // Update the state
+    this.gameState = {
+      ...this.gameState,
+      ...newState
+    };
+
+    const isSignificantChange = 
+      newState.status || // Status changes are important
+      newState.countdown === 5 || // Start of countdown
+      newState.countdown === 0 || // End of countdown
+      (newState.multiplier && Math.floor(newState.multiplier) > Math.floor(this.previousLoggedMultiplier || 0));
+
+    // Emit state change event for local listeners (no logging)
+    this.emit('stateChange', this.gameState);
+    
+    // Broadcast to clients via socketService but with minimal logging
+    if (socketService) {
+      // Only pass forceLog = true for significant events
+      const forceLog = isSignificantChange;
+      
+      // Track the last logged multiplier value
+      if (newState.multiplier && isSignificantChange) {
+        this.previousLoggedMultiplier = newState.multiplier;
+      }
+      
+      // Direct socket broadcast without additional logging
+      socketService.broadcastGameStateChange({
+        gameId: this.gameState.gameId,
+        state: this.gameState.status,
+        multiplier: this.gameState.multiplier,
+        countdown: this.gameState.countdown,
+        timestamp: new Date().toISOString(),
         ...newState
-      };
-
-      // Emit state change event
-      this.emit('stateChange', this.gameState);
-
-    } catch (error) {
-      logger.error('Error updating game state', {
-        gameId: this.gameState?.gameId,
-        error: error.message
-      });
+      }, forceLog);
     }
+  }
+
+  // Alias for backward compatibility 
+  updateGameState(newState) {
+    return this.updateGameStateAndNotify(newState);
   }
 }
 

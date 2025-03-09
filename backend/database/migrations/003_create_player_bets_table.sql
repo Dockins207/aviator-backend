@@ -255,46 +255,75 @@ CREATE TRIGGER game_session_status_transition
     FOR EACH ROW
     EXECUTE FUNCTION manage_game_session_status();
 
--- Function to place a new bet
+-- Drop all versions of the function to clean up
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, json, numeric);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric, text);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, json, text);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, unknown, unknown);
+
+-- Recreate the function with a clear signature
 CREATE OR REPLACE FUNCTION place_bet(
-    p_user_id UUID,
-    p_bet_amount DECIMAL(10, 2),
-    p_game_session_id UUID DEFAULT NULL,
-    p_autocashout_multiplier DECIMAL(10, 2) DEFAULT NULL
-) RETURNS UUID AS $$
+    p_user_id uuid,
+    p_bet_amount numeric,
+    p_game_session_id uuid DEFAULT NULL,
+    p_autocashout_multiplier numeric DEFAULT NULL
+)
+RETURNS uuid AS $$
 DECLARE
-    v_bet_id UUID;
-    v_current_session_id UUID;
+    v_bet_id uuid;
+    v_current_game_session_id uuid;
+    v_wallet_balance numeric;
 BEGIN
-    -- Find current betting session if none provided
+    -- Check wallet balance
+    SELECT balance INTO v_wallet_balance
+    FROM wallets
+    WHERE user_id = p_user_id
+    FOR UPDATE;
+    
+    IF v_wallet_balance IS NULL OR v_wallet_balance < p_bet_amount THEN
+        RAISE EXCEPTION 'Insufficient balance';
+    END IF;
+    
+    -- Deduct bet amount from wallet
+    UPDATE wallets 
+    SET balance = balance - p_bet_amount
+    WHERE user_id = p_user_id;
+    
+    -- Find the current betting phase game if no session ID provided
     IF p_game_session_id IS NULL THEN
-        SELECT game_session_id INTO v_current_session_id
+        SELECT game_session_id INTO v_current_game_session_id
         FROM game_sessions
         WHERE status = 'betting'
         ORDER BY created_at DESC
         LIMIT 1;
     ELSE
-        v_current_session_id := p_game_session_id;
+        v_current_game_session_id := p_game_session_id;
     END IF;
-
-    -- Insert with improved error handling
+    
+    -- Create bet record
     INSERT INTO player_bets (
         user_id, 
-        game_session_id, 
         bet_amount, 
-        status, 
-        autocashout_multiplier
-    ) VALUES (
-        p_user_id,
-        v_current_session_id,
-        p_bet_amount,
-        'pending',
-        p_autocashout_multiplier
-    ) RETURNING bet_id INTO v_bet_id;
+        game_session_id,
+        status,
+        autocashout_multiplier,
+        bet_type
+    )
+    VALUES (
+        p_user_id, 
+        p_bet_amount, 
+        v_current_game_session_id,
+        CASE WHEN v_current_game_session_id IS NOT NULL THEN 'active' ELSE 'pending' END,
+        p_autocashout_multiplier,
+        CASE 
+            WHEN p_autocashout_multiplier IS NOT NULL THEN 'auto'
+            ELSE 'manual'
+        END
+    )
+    RETURNING bet_id INTO v_bet_id;
     
-    -- Log success
-    RAISE NOTICE 'Bet placed: ID=%, User=%, Session=%', v_bet_id, p_user_id, v_current_session_id;
-    
+    -- Return the created bet ID
     RETURN v_bet_id;
 END;
 $$ LANGUAGE plpgsql;

@@ -149,11 +149,45 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- This ensures only one game session can be "in_progress" at a time
+CREATE OR REPLACE FUNCTION enforce_single_active_game() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'in_progress' AND 
+       EXISTS (SELECT 1 FROM game_sessions 
+               WHERE status = 'in_progress' 
+               AND game_session_id <> NEW.game_session_id) THEN
+        RAISE EXCEPTION 'Cannot have multiple active games: Another game is already in progress';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Add a constraint to ensure only one active session at a time
+CREATE OR REPLACE FUNCTION enforce_single_active_session() RETURNS TRIGGER AS $$
+BEGIN
+    -- Count active sessions excluding the current one being created/updated
+    IF (TG_OP = 'INSERT' AND NEW.status IN ('in_progress', 'betting')) OR 
+       (TG_OP = 'UPDATE' AND NEW.status IN ('in_progress', 'betting') AND OLD.status != NEW.status) THEN
+        
+        IF EXISTS (
+            SELECT 1 FROM game_sessions 
+            WHERE status IN ('in_progress', 'betting') 
+            AND game_session_id != COALESCE(NEW.game_session_id, '00000000-0000-0000-0000-000000000000')
+        ) THEN
+            RAISE EXCEPTION 'Cannot have multiple active game sessions';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Remove any existing triggers to avoid duplication
 DROP TRIGGER IF EXISTS assign_pending_bets_trigger ON game_sessions;
 DROP TRIGGER IF EXISTS activate_pending_bets_trigger ON game_sessions;
 DROP TRIGGER IF EXISTS debug_assign_pending_bets ON game_sessions;
 DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
+DROP TRIGGER IF EXISTS enforce_single_active_game_trigger ON game_sessions;
+DROP TRIGGER IF EXISTS enforce_single_active_session_trigger ON game_sessions;
 
 -- Create triggers on game_sessions table
 CREATE TRIGGER assign_pending_bets_trigger
@@ -178,3 +212,12 @@ CREATE TRIGGER debug_activate_pending_bets
     FOR EACH ROW 
     WHEN (OLD.status = 'betting' AND NEW.status = 'in_progress')
     EXECUTE FUNCTION log_trigger_execution();
+
+CREATE TRIGGER enforce_single_active_game_trigger
+    BEFORE UPDATE OR INSERT ON game_sessions
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_single_active_game();
+
+CREATE TRIGGER enforce_single_active_session_trigger
+BEFORE INSERT OR UPDATE ON game_sessions
+FOR EACH ROW EXECUTE FUNCTION enforce_single_active_session();

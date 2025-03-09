@@ -76,26 +76,17 @@ class SocketService {
    * @param {Object} gameStateChange - Game state change details
    * @param {boolean} [cache=false] - Whether to cache the broadcast
    */
-  async broadcastGameStateChange(gameStateChange, cache = false) {
+  broadcastGameStateChange(gameState, forceLog = false) {
     try {
-      // Actual broadcast logic
-      this.io?.emit('gameStateChange', gameStateChange);
-
-      if (cache) {
-        // Removed Redis service import, so cacheService is not available
-        // const broadcastCacheKey = `socket:broadcast:${gameStateChange.gameId}:${Date.now()}`;
-        // await cacheService.set(broadcastCacheKey, gameStateChange, 3600); // 1-hour cache
-      }
-
-      logger.info('Game State Broadcast', {
-        gameId: gameStateChange.gameId,
-        cached: cache
-      });
+      // Just emit the event without any logging
+      this.io.emit('game:state_change', gameState);
     } catch (error) {
-      logger.error('Game State Broadcast Failed', {
-        gameId: gameStateChange.gameId,
-        errorMessage: error.message
-      });
+      // Only log critical errors
+      if (error.message !== 'TypeError: Cannot read properties of undefined (reading \'emit\')') {
+        logger.error('CRITICAL_BROADCAST_ERROR', { 
+          errorMessage: error.message
+        });
+      }
     }
   }
 
