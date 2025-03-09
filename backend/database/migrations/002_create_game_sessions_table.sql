@@ -23,7 +23,7 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'game_type') THEN
-        CREATE TYPE game_type AS ENUM ('aviator', 'crash', 'roulette');
+        CREATE TYPE game_type AS ENUM ('aviator');
     END IF;
     
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'game_status') THEN
@@ -42,6 +42,10 @@ CREATE TABLE game_sessions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_total_bet_amount_non_negative CHECK (total_bet_amount >= 0)
 );
+
+-- Execute this in your PostgreSQL database
+ALTER TABLE game_sessions 
+ALTER COLUMN crash_point TYPE numeric(5,2) USING (crash_point::text::numeric);
 
 -- Create indexes
 DO $$
@@ -110,3 +114,8 @@ BEGIN
     -- Note: player_bets cleanup is handled by foreign key constraints
 END;
 $$ LANGUAGE plpgsql;
+
+-- Check column data type
+SELECT column_name, data_type 
+FROM information_schema.columns 
+WHERE table_name = 'game_sessions' AND column_name = 'crash_point';

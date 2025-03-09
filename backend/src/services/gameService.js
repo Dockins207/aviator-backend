@@ -125,9 +125,6 @@ class GameBoardService extends EventEmitter {
         // Reset game state to preparing
         this.resetGameState();
 
-        // Generate unique game ID
-        const gameId = gameUtils.generateGameUUID();
-        
         // Create a database game session with initial 'betting' status
         const gameSession = await GameRepository.createGameSession('aviator', 'betting');
         

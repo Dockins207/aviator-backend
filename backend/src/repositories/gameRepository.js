@@ -1750,11 +1750,12 @@ class GameRepository {
   }
 
   async markGameSessionComplete(gameSessionId, crashPoint) {
-    // Validate crash point value
+    // Keep the type-checking logic in your repository for better resilience
     if (typeof crashPoint === 'string') {
       crashPoint = parseFloat(crashPoint);
     }
 
+    // Validate crash point value
     if (isNaN(crashPoint) || crashPoint <= 0) {
       const error = new Error('Invalid crash point value');
       logger.error('GAME_SESSION_COMPLETE_ERROR', { 
@@ -1786,6 +1787,19 @@ class GameRepository {
         });
         throw new Error(`No game session found with ID: ${gameSessionId}`);
       }
+      
+      const currentStatus = checkResult.rows[0].status;
+      
+      // Only allow updating if the current status is 'in_progress'
+      if (currentStatus !== 'in_progress') {
+        logger.warn('GAME_SESSION_INVALID_STATUS', { 
+          service: 'aviator-backend',
+          gameSessionId,
+          currentStatus,
+          requiredStatus: 'in_progress'
+        });
+        throw new Error(`Cannot complete game session ${gameSessionId}: current status is ${currentStatus}`);
+      }
 
       // Update game session status to completed
       const updateQuery = `
@@ -1795,20 +1809,20 @@ class GameRepository {
           crash_point = $1,
           ended_at = CURRENT_TIMESTAMP
         WHERE 
-          game_session_id = $2 AND 
-          status != 'completed'
+          game_session_id = $2 AND
+          status = 'in_progress'
         RETURNING game_session_id, crash_point, status
       `;
       
       const result = await client.query(updateQuery, [crashPoint, gameSessionId]);
 
       if (result.rows.length === 0) {
-        logger.warn('GAME_SESSION_ALREADY_COMPLETED', { 
+        logger.warn('GAME_SESSION_UPDATE_FAILED', { 
           service: 'aviator-backend',
           gameSessionId,
-          currentStatus: checkResult.rows[0].status
+          crashPoint
         });
-        throw new Error(`Game session ${gameSessionId} is already in ${checkResult.rows[0].status} status`);
+        throw new Error(`Failed to update game session ${gameSessionId}`);
       }
 
       await client.query('COMMIT');
@@ -1918,6 +1932,35 @@ class GameRepository {
         gameSessionId,
         betAmount,
         errorMessage: error.message
+      });
+      throw error;
+    }
+  }
+
+  async createGameSession(gameType = 'aviator', initialStatus = 'betting') {
+    try {
+      const query = `
+        INSERT INTO game_sessions 
+        (game_type, status)
+        VALUES ($1, $2)
+        RETURNING *
+      `;
+
+      const values = [gameType, initialStatus];
+      const result = await this.pool.query(query, values);
+
+      logger.info('GAME_SESSION_CREATED', {
+        gameSessionId: result.rows[0].game_session_id,
+        gameType,
+        initialStatus
+      });
+
+      return result.rows[0];
+    } catch (error) {
+      logger.error('GAME_SESSION_CREATION_ERROR', {
+        errorMessage: error.message,
+        gameType,
+        initialStatus
       });
       throw error;
     }
