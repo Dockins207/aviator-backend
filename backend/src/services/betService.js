@@ -113,7 +113,7 @@ class BetService {
   }
 
   /**
-   * Process cashout for a bet
+   * Process cashout for a bet - Simplified to rely on database validation
    * @param {Object} options - Cashout options
    * @param {string} options.userId - User ID
    * @param {string} options.betId - Bet reference ID
@@ -122,18 +122,20 @@ class BetService {
    */
   async processCashout(options) {
     const { userId, betId, cashoutMultiplier } = options;
+    const startTime = performance.now();
 
-    // Minimal input validation
-    if (!userId || !betId || cashoutMultiplier <= 1) {
+    // Basic input validation only - detailed validation happens in the database
+    if (!userId || !betId || !cashoutMultiplier) {
       return {
         success: false,
-        error: 'Invalid cashout parameters'
+        error: 'Missing required parameters'
       };
     }
 
     try {
       // Translate reference ID to actual bet ID
       const actualBetId = this.getActualBetId(betId, userId);
+      
       if (!actualBetId) {
         return {
           success: false,
@@ -141,29 +143,42 @@ class BetService {
         };
       }
 
-      // Single repository method for cashout
+      // Pass to repository and let the database handle all validation
       const result = await PlayerBetRepository.cashoutBet({
         betId: actualBetId,
         userId,
         currentMultiplier: cashoutMultiplier
       });
 
+      const processingTime = performance.now() - startTime;
+
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.message || 'Cashout failed',
+          processingTimeMs: processingTime.toFixed(2)
+        };
+      }
+      
       return {
         success: true,
-        betId,  // Return reference ID
+        betId,                // Return reference ID for consistency
         payoutAmount: result.winAmount,
-        newBalance: result.newBalance
+        newBalance: result.newBalance,
+        processingTimeMs: processingTime.toFixed(2)
       };
     } catch (error) {
-      logger.error('CASHOUT_ERROR', {
+      logger.error('CASHOUT_SERVICE_ERROR', {
         userId,
         betId,
-        errorMessage: error.message
+        cashoutMultiplier,
+        error: error.message,
+        stack: error.stack
       });
 
       return {
         success: false,
-        error: 'Cashout failed'
+        error: 'Failed to process cashout'
       };
     }
   }
@@ -360,7 +375,7 @@ class BetService {
   }
 
   /**
-   * Get the actual bet ID from a reference ID
+   * Get the actual bet ID from a reference ID with enhanced security validation
    * @param {string} referenceId - Reference ID
    * @param {string} userId - User ID for validation
    * @returns {string|null} - Actual bet ID or null if not found/unauthorized
@@ -368,16 +383,41 @@ class BetService {
   getActualBetId(referenceId, userId) {
     const mapping = this.betReferences.get(referenceId);
     
-    // Check if mapping exists and belongs to the user
-    if (!mapping || mapping.userId !== userId) {
-      logger.warn('INVALID_BET_REFERENCE', {
+    // Enhanced validation
+    if (!mapping) {
+      logger.warn('BET_REFERENCE_NOT_FOUND', {
         service: 'aviator-backend',
         referenceId,
         userId,
-        found: !!mapping,
-        authorized: mapping && mapping.userId === userId,
         timestamp: new Date().toISOString()
       });
+      return null;
+    }
+    
+    if (mapping.userId !== userId) {
+      logger.warn('BET_REFERENCE_USER_MISMATCH', {
+        service: 'aviator-backend',
+        referenceId,
+        requestedUserId: userId,
+        actualUserId: mapping.userId,
+        timestamp: new Date().toISOString()
+      });
+      return null;
+    }
+    
+    // Check for expired references (older than 24 hours)
+    const ageMs = Date.now() - mapping.createdAt;
+    if (ageMs > 24 * 60 * 60 * 1000) {
+      logger.warn('BET_REFERENCE_EXPIRED', {
+        service: 'aviator-backend',
+        referenceId,
+        userId,
+        ageHours: (ageMs / (60 * 60 * 1000)).toFixed(2),
+        timestamp: new Date().toISOString()
+      });
+      
+      // Remove expired reference
+      this.betReferences.delete(referenceId);
       return null;
     }
     

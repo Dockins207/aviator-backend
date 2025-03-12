@@ -648,7 +648,7 @@ class BetSocket {
         socketId: socket.id
       });
 
-      this.setupGameStateListener(socket);
+      this.setupSocketGameStateListener(socket); // Renamed to avoid confusion
 
       socket.on('placeBet', (payload, callback) => this.handlePlaceBet(socket, payload, callback));
       
@@ -663,7 +663,8 @@ class BetSocket {
     });
   }
 
-  setupGameStateListener(socket) {
+  // Rename this method to avoid confusion with the class-level method
+  setupSocketGameStateListener(socket) {
     RedisService.subscribe('game_state_channel', async (message) => {
       try {
         const gameState = JSON.parse(message);

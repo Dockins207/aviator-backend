@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 import GameRepository from './gameRepository.js';
 import RedisService from '../services/redisService.js';
 import { WalletRepository } from './walletRepository.js';
+import { query } from "../config/db.js";
 
 export default class PlayerBetRepository {
   // Create a bet record in the database
@@ -38,150 +39,55 @@ export default class PlayerBetRepository {
     userId, 
     currentMultiplier 
   }) {
-    // First, attempt to retrieve bet from Redis
-    let bet;
     try {
-      bet = await RedisService.getBet(betId);
-      
-      // Validate Redis bet
-      if (bet && bet.userId !== userId) {
-        logger.warn('REDIS_BET_USER_MISMATCH', {
-          betId,
-          requestedUserId: userId,
-          actualUserId: bet.userId
-        });
-        bet = null;
-      }
-    } catch (redisError) {
-      logger.warn('REDIS_BET_RETRIEVAL_ERROR', {
-        betId,
-        error: redisError.message
-      });
-      bet = null;
-    }
-
-    // If Redis fails, fallback to database
-    const client = await pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-
-      // If no bet in Redis, fetch from database
-      if (!bet) {
-        const betQuery = `
-          SELECT 
-            bet_id, 
-            user_id, 
-            bet_amount, 
-            game_session_id,
-            status
-          FROM player_bets 
-          WHERE bet_id = $1 AND user_id = $2 
-          FOR UPDATE
-        `;
-        const betResult = await client.query(betQuery, [betId, userId]);
-
-        if (betResult.rows.length === 0) {
-          throw new Error('Bet not found or does not belong to user');
-        }
-
-        bet = betResult.rows[0];
-      }
-      
-      // Validate bet status and multiplier
-      if (bet.status !== 'active') {
-        throw new Error('Bet is not active and cannot be cashed out');
-      }
-      
-      if (currentMultiplier <= 1) {
-        throw new Error('Cashout multiplier must be greater than 1');
-      }
-
-      // Calculate payout with precision handling
-      const payoutAmount = parseFloat((bet.bet_amount * currentMultiplier).toFixed(2));
-
-      // Update bet with cashout details
-      const updateQuery = `
-        UPDATE player_bets 
-        SET 
-          cashout_multiplier = JSON_BUILD_OBJECT('timestamp', NOW(), 'multiplier', $1), 
-          payout_amount = $2
-        WHERE bet_id = $3
-        RETURNING *
-      `;
-      
-      const updateResult = await client.query(updateQuery, [
-        currentMultiplier, 
-        payoutAmount,
-        betId
-      ]);
-
-      // Update user's wallet balance
-      const walletUpdate = await WalletRepository.updateBalance(
-        client, 
-        userId, 
-        payoutAmount, 
-        'credit', 
-        'Game cashout'
+      // Simply pass parameters to database function and let it handle all validation
+      const result = await query(
+        'SELECT cashout_bet($1, $2, $3) as result',
+        [userId, betId, currentMultiplier]
       );
 
-      // Remove from active bets in Redis if present
-      const gameSessionId = bet.game_session_id;
-      if (gameSessionId) {
-        try {
-          // Remove the bet from Redis active bets
-          await RedisService.del(`active_bets:${gameSessionId}:${betId}`);
-          
-          logger.info('CASHOUT_REDIS_CLEANUP', {
-            service: 'aviator-backend',
-            betId,
-            userId,
-            gameSessionId,
-            timestamp: new Date().toISOString()
-          });
-        } catch (redisError) {
-          logger.warn('REDIS_ACTIVE_BETS_REMOVE_ERROR', {
-            service: 'aviator-backend',
-            betId,
-            userId,
-            gameSessionId,
-            error: redisError.message
-          });
-        }
+      // Parse the JSON result returned by database function
+      const cashoutResult = result.rows[0].result;
+
+      // Log outcome based on database response
+      if (cashoutResult.success) {
+        logger.info('DATABASE_CASHOUT_SUCCESS', {
+          betId,
+          userId,
+          payoutAmount: cashoutResult.payout_amount,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        logger.warn('DATABASE_CASHOUT_FAILED', {
+          betId,
+          userId,
+          reason: cashoutResult.message,
+          timestamp: new Date().toISOString()
+        });
       }
 
-      await client.query('COMMIT');
-
-      logger.info('CASHOUT_SUCCESS', {
-        service: 'aviator-backend',
-        betId,
-        userId,
-        payoutAmount,
-        multiplier: currentMultiplier,
-        newBalance: walletUpdate.newBalance,
-        timestamp: new Date().toISOString()
-      });
+      // Fetch updated wallet balance for user after cashout
+      const walletResult = await query(
+        'SELECT balance FROM wallets WHERE user_id = $1',
+        [userId]
+      );
 
       return {
-        betId,
-        winAmount: payoutAmount,
-        multiplier: currentMultiplier,
-        newBalance: walletUpdate.newBalance
+        success: cashoutResult.success,
+        message: cashoutResult.message,
+        winAmount: cashoutResult.payout_amount,
+        newBalance: walletResult.rows[0]?.balance || 0
       };
     } catch (error) {
-      await client.query('ROLLBACK');
-      
-      logger.error('CASHOUT_ERROR', {
-        service: 'aviator-backend',
+      logger.error('CASHOUT_DATABASE_ERROR', {
+        error: error.message,
+        stack: error.stack,
         betId,
         userId,
-        error: error.message,
         timestamp: new Date().toISOString()
       });
       
-      throw error;
-    } finally {
-      client.release();
+      throw new Error(`Database cashout error: ${error.message}`);
     }
   }
 
@@ -707,6 +613,80 @@ export default class PlayerBetRepository {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Process a cashout for a bet
+   * @param {Object} options - Cashout options
+   * @param {string} options.betId - Bet ID (UUID)
+   * @param {string} options.userId - User ID (UUID)
+   * @param {number} options.currentMultiplier - Current multiplier value
+   * @returns {Promise<Object>} - Result of cashout operation
+   */
+  async cashoutBet(options) {
+    try {
+      const { betId, userId, currentMultiplier } = options;
+
+      // Log cashout attempt
+      logger.info('CASHOUT_ATTEMPT', {
+        betId,
+        userId,
+        multiplier: currentMultiplier,
+        timestamp: new Date().toISOString()
+      });
+
+      // Call the database function directly with all required parameters
+      const result = await query(
+        'SELECT cashout_bet($1, $2, $3) as result',
+        [userId, betId, currentMultiplier]
+      );
+
+      // Parse the JSON result returned by database function
+      const cashoutResult = result.rows[0].result;
+
+      if (!cashoutResult.success) {
+        // Log failure with database-provided message
+        logger.warn('CASHOUT_FAILED', {
+          betId,
+          userId,
+          reason: cashoutResult.message,
+          timestamp: new Date().toISOString()
+        });
+        
+        throw new Error(cashoutResult.message || 'Cashout failed');
+      }
+
+      // Log success
+      logger.info('CASHOUT_SUCCESS', {
+        betId,
+        userId,
+        payoutAmount: cashoutResult.payout_amount,
+        timestamp: new Date().toISOString()
+      });
+
+      // Fetch updated wallet balance for user
+      const walletResult = await query(
+        'SELECT balance FROM wallets WHERE user_id = $1',
+        [userId]
+      );
+
+      // Return success response with payout and new balance
+      return {
+        success: true,
+        winAmount: cashoutResult.payout_amount,
+        newBalance: walletResult.rows[0]?.balance || 0
+      };
+    } catch (error) {
+      // Log database or unexpected errors
+      logger.error('CASHOUT_ERROR', {
+        error: error.message,
+        stack: error.stack,
+        options,
+        timestamp: new Date().toISOString()
+      });
+      
+      throw new Error(`Failed to process cashout: ${error.message}`);
     }
   }
 }

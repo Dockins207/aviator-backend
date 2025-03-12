@@ -1,7 +1,7 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create bet status enum with simplified statuses
+-- Create required enum types
 DO $$
 DECLARE 
     v_type_exists boolean;
@@ -92,6 +92,295 @@ CREATE INDEX IF NOT EXISTS idx_player_bets_game_session ON player_bets(game_sess
 CREATE INDEX IF NOT EXISTS idx_player_bets_status ON player_bets(status);
 CREATE INDEX IF NOT EXISTS idx_player_bets_bet_type ON player_bets(bet_type);
 
+-- Clean up any existing versions of ALL functions to ensure clean slate
+DROP FUNCTION IF EXISTS process_cashout(uuid, uuid, decimal);
+DROP FUNCTION IF EXISTS cashout_bet(uuid, uuid, decimal);
+DROP FUNCTION IF EXISTS get_user_active_bets(uuid);
+DROP FUNCTION IF EXISTS can_cashout_bet(uuid, uuid);
+DROP FUNCTION IF EXISTS get_cashout_status(uuid, uuid);
+DROP FUNCTION IF EXISTS get_active_bets_for_redis(uuid);
+DROP FUNCTION IF EXISTS auto_activate_pending_bets();
+DROP FUNCTION IF EXISTS check_user_bet_limit();
+DROP FUNCTION IF EXISTS resolve_game_session_bets(uuid, decimal);
+DROP FUNCTION IF EXISTS manage_game_session_status();
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid, numeric);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric);
+DROP FUNCTION IF EXISTS place_bet(uuid, numeric);
+DROP FUNCTION IF EXISTS place_bet(unknown, unknown, unknown, unknown);
+DROP FUNCTION IF EXISTS activate_pending_bets_with_redis();
+DROP FUNCTION IF EXISTS auto_resolve_active_bets();
+DROP FUNCTION IF EXISTS assign_pending_bets_to_new_session();
+DROP FUNCTION IF EXISTS log_trigger_execution();
+DROP FUNCTION IF EXISTS update_player_bets_modtime();
+
+-- Remove triggers that may conflict
+DROP TRIGGER IF EXISTS update_player_bets_modtime ON player_bets;
+DROP TRIGGER IF EXISTS activate_pending_bets_on_game_start ON game_sessions;
+DROP TRIGGER IF EXISTS assign_pending_bets_on_session_create ON game_sessions;
+DROP TRIGGER IF EXISTS debug_assign_pending_bets ON game_sessions;
+DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
+DROP TRIGGER IF EXISTS enforce_bet_limit ON player_bets;
+DROP TRIGGER IF EXISTS game_session_status_transition ON game_sessions;
+DROP TRIGGER IF EXISTS resolve_active_bets_on_game_end ON game_sessions;
+
+-- =====================================================
+-- CASHOUT-RELATED FUNCTIONS
+-- =====================================================
+
+-- Main cashout processing function with comprehensive validation
+CREATE OR REPLACE FUNCTION process_cashout(
+    p_user_id UUID,
+    p_bet_id UUID,
+    p_cashout_multiplier DECIMAL(10, 2)
+) RETURNS TABLE (
+    success BOOLEAN,
+    payout_amount DECIMAL(10, 2),
+    message TEXT
+) AS $$
+DECLARE
+    v_bet RECORD;
+    v_game_session RECORD;
+    v_payout DECIMAL(10, 2);
+BEGIN
+    -- Parameter validation
+    IF p_cashout_multiplier IS NULL OR p_cashout_multiplier <= 1 THEN
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 'Cashout multiplier must be greater than 1';
+        RETURN;
+    END IF;
+
+    -- Verify bet exists and belongs to user (with row locking)
+    SELECT * INTO v_bet
+    FROM player_bets
+    WHERE bet_id = p_bet_id
+    AND user_id = p_user_id
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 'Bet not found or does not belong to user';
+        RETURN;
+    END IF;
+    
+    -- Ensure bet is active
+    IF v_bet.status != 'active' THEN
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 
+            'Bet is not active (current status: ' || v_bet.status || ')';
+        RETURN;
+    END IF;
+    
+    -- Check that the game session is in progress
+    SELECT * INTO v_game_session
+    FROM game_sessions
+    WHERE game_session_id = v_bet.game_session_id
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 'Game session not found';
+        RETURN;
+    END IF;
+
+    IF v_game_session.status != 'in_progress' THEN
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 
+            'Game session is not in progress (current status: ' || v_game_session.status || ')';
+        RETURN;
+    END IF;
+    
+    -- Calculate payout with rounding to 2 decimal places
+    v_payout := ROUND((v_bet.bet_amount * p_cashout_multiplier)::numeric, 2);
+    
+    -- Process transaction as an atomic operation
+    BEGIN
+        -- Update bet with cashout information
+        UPDATE player_bets
+        SET 
+            status = 'won',
+            cashout_multiplier = p_cashout_multiplier,
+            payout_amount = v_payout
+        WHERE bet_id = p_bet_id;
+        
+        -- Credit user wallet - handle last_updated column gracefully if it exists
+        UPDATE wallets
+        SET 
+            balance = balance + v_payout,
+            last_updated = CASE 
+                WHEN EXISTS (SELECT 1 FROM information_schema.columns 
+                             WHERE table_name = 'wallets' AND column_name = 'last_updated')
+                THEN NOW()
+                ELSE last_updated
+            END
+        WHERE user_id = p_user_id;
+        
+        -- Try to record the transaction in wallet_transactions if table exists
+        BEGIN
+            INSERT INTO wallet_transactions (
+                user_id, 
+                amount, 
+                transaction_type, 
+                reference_id, 
+                description
+            )
+            VALUES (
+                p_user_id, 
+                v_payout, 
+                'credit', 
+                p_bet_id, 
+                'Game cashout at ' || p_cashout_multiplier || 'x'
+            );
+        EXCEPTION WHEN undefined_table THEN
+            -- Table doesn't exist, skip recording transaction
+            NULL;
+        END;
+        
+        -- Return success info
+        RETURN QUERY SELECT true, v_payout, 'Cashout processed successfully at ' || p_cashout_multiplier || 'x multiplier';
+        
+    EXCEPTION WHEN OTHERS THEN
+        -- On error, return failure
+        RETURN QUERY SELECT false, 0::DECIMAL(10,2), 'Error processing cashout: ' || SQLERRM;
+    END;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Front-end API function for cashout (returns JSON response)
+CREATE OR REPLACE FUNCTION cashout_bet(
+    p_user_id UUID,
+    p_bet_id UUID,
+    p_current_multiplier DECIMAL(10, 2)
+) RETURNS JSON AS $$
+DECLARE
+    result RECORD;
+BEGIN
+    -- Process the cashout and return result as JSON
+    SELECT * INTO result FROM process_cashout(p_user_id, p_bet_id, p_current_multiplier);
+    
+    RETURN json_build_object(
+        'success', result.success,
+        'payout_amount', result.payout_amount,
+        'message', result.message
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- Helper function to get a user's active bets
+CREATE OR REPLACE FUNCTION get_user_active_bets(p_user_id UUID) 
+RETURNS TABLE (
+    bet_id UUID,
+    bet_amount DECIMAL(10, 2),
+    game_session_id UUID,
+    status TEXT,
+    autocashout_multiplier DECIMAL(10, 2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        pb.bet_id,
+        pb.bet_amount,
+        pb.game_session_id,
+        pb.status::TEXT,
+        pb.autocashout_multiplier
+    FROM 
+        player_bets pb
+        JOIN game_sessions gs ON pb.game_session_id = gs.game_session_id
+    WHERE 
+        pb.user_id = p_user_id 
+        AND pb.status = 'active'
+        AND gs.status = 'in_progress';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Quick validation function to check if a bet can be cashed out
+CREATE OR REPLACE FUNCTION can_cashout_bet(
+    p_user_id UUID,
+    p_bet_id UUID
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_bet RECORD;
+    v_game_session RECORD;
+BEGIN
+    -- Check if bet exists and belongs to user
+    SELECT * INTO v_bet
+    FROM player_bets
+    WHERE bet_id = p_bet_id
+    AND user_id = p_user_id;
+    
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    
+    -- Check if bet is active
+    IF v_bet.status != 'active' THEN
+        RETURN FALSE;
+    END IF;
+    
+    -- Check if game session is in progress
+    SELECT * INTO v_game_session
+    FROM game_sessions
+    WHERE game_session_id = v_bet.game_session_id;
+    
+    IF NOT FOUND OR v_game_session.status != 'in_progress' THEN
+        RETURN FALSE;
+    END IF;
+    
+    -- All checks passed
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Detailed function to get cashout status with reason
+CREATE OR REPLACE FUNCTION get_cashout_status(
+    p_user_id UUID,
+    p_bet_id UUID
+) RETURNS JSON AS $$
+DECLARE
+    v_bet RECORD;
+    v_game_session RECORD;
+    v_error TEXT;
+BEGIN
+    -- Check if bet exists and belongs to user
+    SELECT * INTO v_bet
+    FROM player_bets
+    WHERE bet_id = p_bet_id;
+    
+    IF NOT FOUND THEN
+        v_error := 'Bet not found';
+        RETURN json_build_object('can_cashout', FALSE, 'reason', v_error);
+    END IF;
+    
+    IF v_bet.user_id != p_user_id THEN
+        v_error := 'Bet does not belong to user';
+        RETURN json_build_object('can_cashout', FALSE, 'reason', v_error);
+    END IF;
+    
+    -- Check if bet is active
+    IF v_bet.status != 'active' THEN
+        v_error := 'Bet is not active (status: ' || v_bet.status || ')';
+        RETURN json_build_object('can_cashout', FALSE, 'reason', v_error);
+    END IF;
+    
+    -- Check if game session is in progress
+    SELECT * INTO v_game_session
+    FROM game_sessions
+    WHERE game_session_id = v_bet.game_session_id;
+    
+    IF NOT FOUND THEN
+        v_error := 'Game session not found';
+        RETURN json_build_object('can_cashout', FALSE, 'reason', v_error);
+    END IF;
+    
+    IF v_game_session.status != 'in_progress' THEN
+        v_error := 'Game session is not in progress (status: ' || v_game_session.status || ')';
+        RETURN json_build_object('can_cashout', FALSE, 'reason', v_error);
+    END IF;
+    
+    -- All checks passed
+    RETURN json_build_object('can_cashout', TRUE);
+END;
+$$ LANGUAGE plpgsql;
+
+-- =====================================================
+-- BET MANAGEMENT FUNCTIONS
+-- =====================================================
+
 -- Function to get active bets for Redis when game starts
 CREATE OR REPLACE FUNCTION get_active_bets_for_redis(p_game_session_id UUID)
 RETURNS TABLE (
@@ -166,11 +455,6 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
-CREATE TRIGGER enforce_bet_limit
-BEFORE INSERT ON player_bets
-FOR EACH ROW
-EXECUTE FUNCTION check_user_bet_limit();
 
 -- Function to resolve bets at the end of a game session
 CREATE OR REPLACE FUNCTION resolve_game_session_bets(
@@ -249,19 +533,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger to manage game session status transitions
-CREATE TRIGGER game_session_status_transition
-    BEFORE UPDATE ON game_sessions
-    FOR EACH ROW
-    EXECUTE FUNCTION manage_game_session_status();
-
--- Drop all versions of the function to clean up - enhanced with unknown types
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid, numeric);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, uuid);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric, numeric);
-DROP FUNCTION IF EXISTS place_bet(uuid, numeric);
-DROP FUNCTION IF EXISTS place_bet(unknown, unknown, unknown, unknown);
-
 -- Recreate the function with a clear signature and always set status to pending
 CREATE OR REPLACE FUNCTION place_bet(
     p_user_id uuid,
@@ -288,9 +559,6 @@ BEGIN
     UPDATE wallets 
     SET balance = balance - p_bet_amount
     WHERE user_id = p_user_id;
-    
-    -- IMPORTANT: Always create bet with NULL game_session_id
-    -- We don't try to find a current session anymore
     
     -- Create bet record
     INSERT INTO player_bets (
@@ -367,9 +635,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Drop existing function if exists
-DROP FUNCTION IF EXISTS auto_resolve_active_bets() CASCADE;
-
 -- Function to automatically resolve active bets when game session completes
 CREATE OR REPLACE FUNCTION auto_resolve_active_bets() RETURNS TRIGGER AS $$
 DECLARE
@@ -412,18 +677,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger to resolve active bets when game session completes
-CREATE TRIGGER resolve_active_bets_on_game_end
-    AFTER UPDATE ON game_sessions
-    FOR EACH ROW
-    WHEN (OLD.status = 'in_progress' AND NEW.status = 'completed')
-    EXECUTE FUNCTION auto_resolve_active_bets();
-
--- Remove the update_player_bets_modtime trigger and function
-DROP TRIGGER IF EXISTS update_player_bets_modtime ON player_bets;
-DROP FUNCTION IF EXISTS update_player_bets_modtime();
-
--- Trigger to assign pending bets to new game sessions
+-- Function to assign pending bets to new game sessions 
 CREATE OR REPLACE FUNCTION assign_pending_bets_to_new_session() 
 RETURNS TRIGGER AS $$
 BEGIN
@@ -449,13 +703,25 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Remove triggers that monitor game_sessions from the player_bets file
-DROP TRIGGER IF EXISTS activate_pending_bets_on_game_start ON game_sessions;
-DROP TRIGGER IF EXISTS assign_pending_bets_on_session_create ON game_sessions;
-DROP TRIGGER IF EXISTS debug_assign_pending_bets ON game_sessions;
-DROP TRIGGER IF EXISTS debug_activate_pending_bets ON game_sessions;
+-- =====================================================
+-- CREATE TRIGGERS
+-- =====================================================
 
--- First check what columns actually exist
-SELECT column_name 
-FROM information_schema.columns 
-WHERE table_name = 'player_bets';
+-- Trigger to enforce bet limit
+CREATE TRIGGER enforce_bet_limit
+BEFORE INSERT ON player_bets
+FOR EACH ROW
+EXECUTE FUNCTION check_user_bet_limit();
+
+-- Trigger to manage game session status transitions
+CREATE TRIGGER game_session_status_transition
+    BEFORE UPDATE ON game_sessions
+    FOR EACH ROW
+    EXECUTE FUNCTION manage_game_session_status();
+
+-- Trigger to resolve active bets when game session completes
+CREATE TRIGGER resolve_active_bets_on_game_end
+    AFTER UPDATE ON game_sessions
+    FOR EACH ROW
+    WHEN (OLD.status = 'in_progress' AND NEW.status = 'completed')
+    EXECUTE FUNCTION auto_resolve_active_bets();
