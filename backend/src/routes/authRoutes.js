@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/authMiddleware.js';
 import phoneValidator from '../utils/phoneValidator.js';
 import bcrypt from 'bcrypt';
 import { pool } from '../config/database.js';
+import jwt from 'jsonwebtoken'; // Import jwt
 
 const router = express.Router();
 
@@ -19,13 +20,15 @@ router.post('/login', async (req, res) => {
       clientIp: req.ip
     });
 
-    const { phoneNumber, password } = req.body;
+    // Handle both phone and phoneNumber fields
+    const { phone, phoneNumber, password } = req.body;
+    const userPhone = phone || phoneNumber;
 
     // Validate input presence
-    if (!phoneNumber || !password) {
+    if (!userPhone || !password) {
       logger.error('LOGIN_MISSING_CREDENTIALS', {
         missingFields: {
-          phoneNumber: !phoneNumber,
+          phone: !userPhone,
           password: !password
         }
       });
@@ -40,10 +43,10 @@ router.post('/login', async (req, res) => {
     }
 
     // Validate phone number
-    const validationResult = phoneValidator.validate(phoneNumber);
+    const validationResult = phoneValidator.validate(userPhone);
     if (!validationResult.isValid) {
       logger.error('LOGIN_INVALID_PHONE_NUMBER', {
-        originalPhoneNumber: phoneNumber,
+        originalPhoneNumber: userPhone,
         validationError: validationResult.error,
         supportedFormats: validationResult.supportedFormats
       });
@@ -78,7 +81,7 @@ router.post('/login', async (req, res) => {
       logger.error('LOGIN_SERVICE_ERROR', {
         errorMessage: loginError.message,
         errorStack: loginError.stack,
-        phoneNumber: phoneNumber,
+        phone: userPhone,
         sensitiveDetailsRedacted: true
       });
 
@@ -113,16 +116,58 @@ router.post('/login', async (req, res) => {
 
 // Register route
 router.post('/register', async (req, res) => {
+  console.log('REGISTER REQUEST RECEIVED', {
+    body: req.body,
+    contentType: req.headers['content-type'],
+    hasBody: !!req.body,
+  });
+  
+  try {
+    logger.debug('RAW_REGISTER_REQUEST', {
+      timestamp: new Date().toISOString(),
+      body: JSON.stringify(req.body),
+      headers: JSON.stringify(req.headers),
+      url: req.originalUrl
+    });
+  } catch (logError) {
+    console.error('Failed to log request', logError);
+  }
+  
   const registerUser = async (req, res) => {
-    const { username, phoneNumber, password } = req.body;
+    // Handle both phone and phoneNumber fields for compatibility
+    const { username, phone, phoneNumber, password } = req.body;
+    
+    // Use phone if available, otherwise use phoneNumber
+    const userPhone = phone || phoneNumber;
+    
     const registrationTimestamp = new Date().toISOString();
     const startTime = performance.now(); // Performance tracking
+
+    console.log('Registration data extracted:', { 
+      usernamePresent: !!username, 
+      phonePresent: !!userPhone, 
+      passwordPresent: !!password 
+    });
+
+    // Validate required fields
+    if (!username || !userPhone || !password) {
+      return res.status(400).json({
+        status: 'error',
+        code: 'MISSING_FIELDS',
+        message: 'Missing required fields for registration',
+        details: {
+          username: !username ? 'Username is required' : undefined,
+          phone: !userPhone ? 'Phone number is required' : undefined,
+          password: !password ? 'Password is required' : undefined
+        }
+      });
+    }
 
     // Set a timeout for the entire registration process
     const registrationTimeout = setTimeout(() => {
       logger.warn('REGISTRATION_TIMEOUT', {
         username,
-        phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
+        phone: userPhone ? userPhone.replace(/\d{4}$/, '****') : 'undefined',
         elapsedTime: performance.now() - startTime
       });
       res.status(504).json({
@@ -130,142 +175,85 @@ router.post('/register', async (req, res) => {
         code: 'REGISTRATION_TIMEOUT',
         message: 'Registration process took too long'
       });
-    }, 9000); // 9 seconds to allow some buffer
+    }, 15000); // Increased timeout to 15 seconds to allow wallet creation
 
     try {
       // Enhanced logging for registration attempt
       logger.info('USER_REGISTRATION_ATTEMPT', {
         username,
-        phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
+        phone: userPhone ? userPhone.replace(/\d{4}$/, '****') : 'undefined',
         timestamp: registrationTimestamp
       });
 
-      // Parallel database checks for efficiency
-      const [existingUserByUsername, existingUserByPhone] = await Promise.all([
-        pool.query('SELECT * FROM users WHERE username = $1', [username]),
-        pool.query('SELECT * FROM users WHERE phone_number = $1', [phoneNumber])
-      ]);
+      // Register user
+      const user = await authService.register(username, userPhone, password);
+      
+      // Clear timeout
+      clearTimeout(registrationTimeout);
+      
+      // Check if user has a wallet
+      const hasWallet = user.walletCreated || false;
+      const walletInfo = hasWallet ? {
+        walletCreated: true,
+        initialBalance: 0,
+        currency: 'KSH'
+      } : {
+        walletCreated: false,
+        message: 'Wallet will be created on first login'
+      };
+      
+      // Generate token for automatic login after registration
+      const token = jwt.sign(
+        {
+          user_id: parseInt(user.user_id, 10),
+          username: user.username,
+          phone: user.phone,
+          role: user.role || 'player'
+        },
+        process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237',
+        { expiresIn: '7d' }
+      );
 
-      if (existingUserByUsername.rows.length > 0) {
-        clearTimeout(registrationTimeout);
-        logger.warn('REGISTRATION_USERNAME_CONFLICT', {
-          username,
-          existingUserCount: existingUserByUsername.rows.length
-        });
-        return res.status(409).json({
-          status: 'error',
-          code: 'USERNAME_ALREADY_EXISTS',
-          message: 'Username is already registered'
-        });
-      }
-
-      if (existingUserByPhone.rows.length > 0) {
-        clearTimeout(registrationTimeout);
-        logger.warn('REGISTRATION_PHONE_CONFLICT', {
-          phoneNumber: phoneNumber.replace(/\d{4}$/, '****'),
-          existingUserCount: existingUserByPhone.rows.length
-        });
-        return res.status(409).json({
-          status: 'error',
-          code: 'PHONE_NUMBER_ALREADY_EXISTS',
-          message: 'Phone number is already registered'
-        });
-      }
-
-      // Hash password with performance tracking
-      const passwordHashStart = performance.now();
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const passwordHashDuration = performance.now() - passwordHashStart;
-
-      // Begin transaction with timeout
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-
-        // User insertion with performance tracking
-        const userInsertStart = performance.now();
-        const userInsertQuery = `
-          INSERT INTO users 
-          (username, phone_number, password_hash, salt, role, verification_status, is_active, created_at, updated_at) 
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
-          RETURNING user_id
-        `;
-        const userResult = await client.query(userInsertQuery, [
-          username, 
-          phoneNumber, 
-          hashedPassword,
-          '', // salt 
-          'player', // default role
-          'unverified', // verification_status
-          true, // is_active
-          new Date(), // created_at
-          new Date() // updated_at
-        ]);
-        const userInsertDuration = performance.now() - userInsertStart;
-
-        const userId = userResult.rows[0].user_id;
-
-        // Commit transaction
-        await client.query('COMMIT');
-
-        // Clear timeout
-        clearTimeout(registrationTimeout);
-
-        const totalRegistrationTime = performance.now() - startTime;
-
-        logger.info('USER_REGISTRATION_PERFORMANCE', {
-          userId,
-          username,
-          totalTime: totalRegistrationTime,
-          passwordHashTime: passwordHashDuration,
-          userInsertTime: userInsertDuration
-        });
-
-        logger.info('USER_REGISTRATION_SUCCESS', {
-          userId,
-          username,
-          registrationTimestamp
-        });
-
-        res.status(201).json({
-          status: 'success',
-          message: 'User registered successfully',
-          userId,
-          registrationTime: totalRegistrationTime
-        });
-
-      } catch (dbError) {
-        // Rollback transaction
-        await client.query('ROLLBACK');
-        
-        clearTimeout(registrationTimeout);
-
-        logger.error('USER_REGISTRATION_DATABASE_ERROR', {
-          error: dbError.message,
-          stack: dbError.stack
-        });
-
-        res.status(500).json({
-          status: 'error',
-          code: 'DATABASE_ERROR',
-          message: 'Failed to complete registration'
-        });
-      } finally {
-        client.release();
-      }
+      // Return success response with token and wallet info
+      res.status(201).json({
+        status: 'success',
+        message: 'User registered successfully',
+        user: {
+          userId: user.user_id,
+          username: user.username,
+          phone: user.phone
+        },
+        wallet: walletInfo,
+        token
+      });
 
     } catch (error) {
       clearTimeout(registrationTimeout);
-
-      logger.error('USER_REGISTRATION_UNEXPECTED_ERROR', {
+      
+      logger.error('USER_REGISTRATION_ERROR', {
         error: error.message,
         stack: error.stack
       });
-
-      res.status(500).json({
+      
+      // Determine appropriate error code and message
+      let errorCode = 'REGISTRATION_ERROR';
+      let errorMessage = 'Registration failed. Please try again.';
+      let statusCode = 500;
+      
+      if (error.message.includes('already exists')) {
+        errorCode = 'USER_ALREADY_EXISTS';
+        errorMessage = error.message;
+        statusCode = 409; // Conflict
+      } else if (error.message.includes('Invalid phone')) {
+        errorCode = 'INVALID_PHONE';
+        errorMessage = error.message;
+        statusCode = 400; // Bad request
+      }
+      
+      res.status(statusCode).json({
         status: 'error',
-        code: 'UNEXPECTED_ERROR',
-        message: 'An unexpected error occurred during registration'
+        code: errorCode,
+        message: errorMessage
       });
     }
   };
@@ -283,13 +271,13 @@ router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
       req.ip,
       {
         userAgent: req.get('User-Agent'),
-        phoneNumber: req.user.phone_number
+        phoneNumber: req.user.phone
       }
     );
 
     // Retrieve full user profile
     const userProfile = await authService.getUserProfile(req.user.user_id);
-    
+
     res.status(200).json({
       status: 'success',
       data: userProfile
@@ -314,14 +302,14 @@ router.get('/profile', authMiddleware.authenticateToken, async (req, res) => {
 router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { username, phoneNumber } = req.body;
-    
+    const { username, phone } = req.body; // Changed from phoneNumber to phone
+
     // Validate phone number if provided
     let validatedPhoneNumber = null;
-    if (phoneNumber) {
-      const validationResult = phoneValidator.validate(phoneNumber);
+    if (phone) { // Changed from phoneNumber to phone
+      const validationResult = phoneValidator.validate(phone); // Changed from phoneNumber to phone
       if (!validationResult.isValid) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Invalid phone number', 
           error: validationResult.error,
           supportedFormats: validationResult.supportedFormats
@@ -329,19 +317,19 @@ router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
       }
       validatedPhoneNumber = validationResult.formattedNumber;
     }
-    
+
     const updatedProfile = await authService.updateProfile(userId, { 
       username, 
-      phoneNumber: validatedPhoneNumber 
+      phone: validatedPhoneNumber // Changed from phoneNumber to phone
     });
-    
+
     await logger.userActivity(
       userId, 
       'profile_update',
       req.ip,
       {
         userAgent: req.get('User-Agent'),
-        phoneNumber: req.user.phone_number
+        phoneNumber: req.user.phone // Changed from phoneNumber to phone
       }
     );
 
@@ -351,8 +339,6 @@ router.put('/profile', authMiddleware.authenticateToken, async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 });
-
-// Fallback balance route for backwards compatibility
 
 // Logout route with token management
 router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {
@@ -364,13 +350,13 @@ router.post('/logout', authMiddleware.authenticateToken, async (req, res) => {
       req.ip,
       {
         userAgent: req.get('User-Agent'),
-        phoneNumber: req.user.phone_number
+        phoneNumber: req.user.phone // Changed from phoneNumber to phone
       }
     );
 
     // Blacklist the current token
     authMiddleware.blacklistToken(req.token);
-    
+
     res.status(200).json({
       status: 'success',
       message: 'Logged out successfully'
@@ -404,7 +390,7 @@ router.post('/refresh', async (req, res) => {
       logger.error('REFRESH_TOKEN_MISSING', {
         source: 'refresh_route'
       });
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Refresh token is required',
         code: 'MISSING_REFRESH_TOKEN'
       });

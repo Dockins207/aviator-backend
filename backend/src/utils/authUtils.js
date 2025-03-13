@@ -43,14 +43,22 @@ export async function validateToken(token) {
     // Verify token
     const decoded = jwt.verify(cleanToken, JWT_SECRET);
     
+    // Ensure user_id is a number
+    if (decoded.user_id) {
+      decoded.user_id = parseInt(decoded.user_id, 10);
+      if (isNaN(decoded.user_id)) {
+        throw new Error('Invalid user ID in token');
+      }
+    }
+    
     // Normalize phone number in decoded token
-    if (decoded.phone_number) {
-      decoded.phone_number = normalizePhoneNumber(decoded.phone_number);
+    if (decoded.phone) {
+      decoded.phone = normalizePhoneNumber(decoded.phone);
     }
 
     logger.debug('TOKEN_VALIDATION', {
       userId: decoded.user_id,
-      phoneNumber: decoded.phone_number,
+      phone: decoded.phone,
       timestamp: new Date().toISOString()
     });
 
@@ -67,12 +75,13 @@ export async function validateToken(token) {
 // Standard token generation
 export function generateToken(user) {
   const payload = {
-    user_id: user.user_id,
+    user_id: parseInt(user.userId, 10), // Ensure ID is a number
     username: user.username,
-    role: user.role || 'user',
-    roles: user.roles || ['user'],
-    phone_number: normalizePhoneNumber(user.phone_number),
-    is_active: user.is_active || false
+    role: user.role || 'player',
+    roles: user.roles || ['player'],
+    phone: normalizePhoneNumber(user.phone),
+    is_active: user.isActive || false,
+    ver_status: user.verStatus || 'unverified'
   };
 
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });

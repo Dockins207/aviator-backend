@@ -98,7 +98,7 @@ export const authService = {
       // Start a database transaction
       await client.query('BEGIN');
 
-      logger.info('User registration', {
+      logger.info('Starting user registration process', {
         username: username,
         phoneNumber: phoneNumber.replace(/\d{4}/, '****')
       });
@@ -181,8 +181,8 @@ export const authService = {
         throw new Error(validationResult.error);
       }
 
-      // Check if user already exists
-      const existingUserQuery = 'SELECT * FROM users WHERE phone_number = $1 OR username = $2';
+      // Check if user already exists - UPDATED column name
+      const existingUserQuery = 'SELECT * FROM users WHERE phone = $1 OR username = $2';
       const existingUserResult = await client.query(existingUserQuery, [validationResult.normalizedNumber, username]);
       
       if (existingUserResult.rows.length > 0) {
@@ -192,101 +192,103 @@ export const authService = {
         throw new Error('User with this phone number or username already exists');
       }
 
-      // Generate salt
-      const saltRounds = 10;
-      const salt = await bcrypt.genSalt(saltRounds);
-
-      // Hash password
-      const passwordHash = await bcrypt.hash(password, salt);
-
-      // Generate unique user ID
-      const userId = uuidv4();
-
-      // Insert new user with additional error handling
+      // Insert new user with correct column names
       const insertQuery = `
         INSERT INTO users (
-          user_id, 
           username, 
-          phone_number, 
-          password_hash, 
+          phone, 
+          pwd_hash, 
           salt,
-          is_active,  
-          created_at,
-          updated_at
+          role,
+          created_at
         ) 
-        VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
-        RETURNING user_id, username, phone_number, role, is_active, created_at
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) 
+        RETURNING user_id, username, phone, role, created_at
       `;
       
       let result;
       try {
+        // Generate salt for password
+        const saltRounds = 10;
+        const salt = await bcrypt.genSalt(saltRounds);
+        const passwordHash = await bcrypt.hash(password, salt);
+        
+        // Insert user
         result = await client.query(insertQuery, [
-          userId, 
           username, 
           validationResult.normalizedNumber, 
           passwordHash, 
-          saltRounds.toString()
+          salt,
+          'player' // default role
         ]);
-      } catch (insertError) {
-        logger.error('REGISTER_DATABASE_INSERT_ERROR', {
-          errorCode: 'DATABASE_INSERT_FAILED',
-          errorMessage: insertError.message,
-          errorDetails: {
-            sqlState: insertError.code,
-            constraint: insertError.constraint
-          },
-          userData: {
-            userId: userId,
-            usernameLength: username.length,
-            phoneNumberLength: phoneNumber.length
-          }
-        });
-        throw new Error('Failed to create user account');
-      }
-
-      // Create wallet for the new user using WalletRepository
-      try {
-        await WalletRepository.createWallet(userId);
-      } catch (walletError) {
-        // Rollback the transaction if wallet creation fails
-        await client.query('ROLLBACK');
-        logger.error('WALLET_CREATION_FAILED', {
+        
+        const userId = result.rows[0].user_id;
+        
+        logger.info('User created successfully', {
           userId,
-          errorMessage: walletError.message
+          username
         });
-        throw new Error('Failed to create user wallet');
+        
+        // Also create user profile
+        const profileQuery = `
+          INSERT INTO user_profiles (
+            user_id, 
+            ver_status, 
+            is_active,
+            updated_at
+          ) 
+          VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        `;
+        
+        await client.query(profileQuery, [
+          userId,
+          'unverified',
+          true
+        ]);
+        
+        logger.info('User profile created', {
+          userId
+        });
+
+        // Commit the transaction to ensure user is created
+        await client.query('COMMIT');
+
+        // Create wallet for the new user in a separate transaction
+        await WalletRepository.createWallet(userId);
+
+      } catch (insertError) {
+        // Rollback transaction on error
+        await client.query('ROLLBACK');
+        logger.error('User insert error', {
+          errorMessage: insertError.message,
+          errorCode: insertError.code,
+          username: username
+        });
+        
+        throw new Error(insertError.code === '23505' ? 
+          'Username or phone number already exists' : 
+          'Error creating user account');
       }
 
-      // Commit the transaction
-      await client.query('COMMIT');
-
-      logger.info('User registered and activated successfully', {
+      logger.info('User registered successfully', {
         username: username,
-        userId: userId,
+        userId: result.rows[0].user_id,
         isActive: true
       });
 
       return {
         ...result.rows[0],
-        is_active: true  
+        is_active: true
       };
     } catch (error) {
-      // Ensure transaction is rolled back in case of any error
-      await client.query('ROLLBACK');
-
-      logger.error('REGISTER_FATAL_ERROR', {
-        errorCode: 'REGISTRATION_FAILED',
-        errorMessage: error.message,
-        errorStack: error.stack,
-        phoneNumberRedacted: phoneNumber.replace(/\d{4}/, '****'),
-        additionalContext: {
-          usernameLength: username ? username.length : 'N/A',
-          phoneNumberLength: phoneNumber ? phoneNumber.length : 'N/A'
-        }
+      logger.error('Registration error', {
+        username,
+        error: error.message,
+        stack: error.stack
       });
+      
       throw error;
     } finally {
-      // Always release the client back to the pool
       client.release();
     }
   },
@@ -321,20 +323,21 @@ export const authService = {
       // Use normalized phone number for further processing
       const normalizedPhoneNumber = validationResult.normalizedNumber;
 
-      // Find user by normalized phone number
+      // Find user by normalized phone number with updated column names and table join
       const userQuery = `
         SELECT 
-          user_id,
-          username,
-          password_hash,
-          phone_number,
-          role,
-          is_active,
-          last_login,
-          created_at,
-          updated_at
-        FROM users 
-        WHERE phone_number = $1
+          u.user_id,
+          u.username,
+          u.pwd_hash,
+          u.phone,
+          u.role,
+          p.is_active,
+          p.last_login,
+          u.created_at,
+          p.updated_at
+        FROM users u
+        LEFT JOIN user_profiles p ON u.user_id = p.user_id
+        WHERE u.phone = $1
       `;
       const userResult = await pool.query(userQuery, [normalizedPhoneNumber]);
 
@@ -349,7 +352,7 @@ export const authService = {
       const user = userResult.rows[0];
 
       // Verify password
-      const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+      const isPasswordValid = await bcrypt.compare(password, user.pwd_hash);
 
       if (!isPasswordValid) {
         logger.error(`[${traceId}] Login failed`, {
@@ -359,21 +362,22 @@ export const authService = {
         throw new Error('Invalid phone number or password');
       }
 
-      // Update last login
-      await pool.query('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = $1', [user.user_id]);
+      // Update last login in user_profiles table
+      await pool.query('UPDATE user_profiles SET last_login = CURRENT_TIMESTAMP WHERE user_id = $1', [user.user_id]);
 
       // Initialize wallet if needed and get balance
       await balanceService.syncUserBalanceToWallet(user.user_id);
       const walletInfo = await balanceService.getWalletBalance(user.user_id);
 
-      // Generate JWT token
+      // Generate JWT token with updated field names - ensure user_id is numeric
       const token = jwt.sign(
         {
-          user_id: user.user_id,
+          user_id: parseInt(user.user_id, 10), // Ensure ID is a number
           username: user.username,
           role: user.role || 'player',
-          phone_number: user.phone_number,
-          is_active: user.is_active || false
+          phone: user.phone,
+          is_active: user.is_active || false,
+          ver_status: user.ver_status || 'unverified'
         },
         process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237', 
         { expiresIn: '7d' }
@@ -384,16 +388,16 @@ export const authService = {
       });
 
       // Remove sensitive information
-      delete user.password_hash;
+      delete user.pwd_hash;
 
       return { 
         success: true,
         message: 'Login successful',
         token, 
         user: {
-          userId: user.user_id,
+          userId: parseInt(user.user_id, 10), // Ensure ID is a number
           username: user.username,
-          phoneNumber: user.phone_number,
+          phone: user.phone,
           role: user.role || 'player',
           isActive: user.is_active || false,
           balance: walletInfo.balance,
@@ -410,7 +414,6 @@ export const authService = {
     }
   },
 
-  // Verify user token using JWT verification
   async verifyUserToken(token) {
     if (!token) {
       throw new Error('No authentication token provided');
@@ -444,7 +447,6 @@ export const authService = {
 
       // Check if the token is valid in Redis
       // const redisClient = await redisRepository.getClient();
-
       // const userTokenKey = `user_token:${token}`;
       // const userData = await redisClient.get(userTokenKey);
 
@@ -457,7 +459,6 @@ export const authService = {
       // }
 
       // const parsedUserData = JSON.parse(userData);
-      
       logger.info('Token successfully validated', { 
         userId: decoded.user_id,
         timestamp: new Date().toISOString()
@@ -478,8 +479,8 @@ export const authService = {
     try {
       const query = `
         SELECT 
-          user_id, username, phone_number, role, 
-          verification_status, last_login, created_at 
+          user_id, username, phone, role, 
+          created_at 
         FROM users 
         WHERE user_id = $1
       `;
@@ -502,26 +503,32 @@ export const authService = {
   },
 
   async getUserProfile(userId, autoActivate = false) {
+    // Validate that userId is an integer
+    if (!Number.isInteger(userId)) {
+        throw new Error(`Invalid input syntax for type integer: "${userId}"`);
+    }
+
     try {
       logger.debug('FETCHING_USER_PROFILE', {
         userId,
         autoActivate
       });
 
-      // First get user data
+      // First get user data with correct column names
       const userQuery = `
         SELECT 
-          user_id,
-          username,
-          phone_number,
-          role,
-          is_active,
-          last_login,
-          last_password_change,
-          created_at,
-          updated_at
-        FROM users 
-        WHERE user_id = $1
+          u.user_id,
+          u.username,
+          u.phone,
+          u.role,
+          p.is_active,
+          p.last_login,
+          p.last_pwd_change,
+          u.created_at,
+          p.updated_at
+        FROM users u
+        LEFT JOIN user_profiles p ON u.user_id = p.user_id
+        WHERE u.user_id = $1
       `;
       
       const userResult = await pool.query(userQuery, [userId]);
@@ -529,15 +536,15 @@ export const authService = {
       if (userResult.rows.length === 0) {
         logger.warn('USER_PROFILE_NOT_FOUND', {
           userId,
-          action: 'Creating default profile'
+          autoActivate
         });
 
-        // Create a default profile for valid tokens
+        // Insert default profile for valid tokens
         const defaultProfile = {
-          user_id: userId || crypto.randomUUID(), // Use provided userId or generate a new one
+          user_id: userId || crypto.randomUUID(),
           username: 'Guest User',
-          phone_number: '',
-          role: 'player',  // Changed from 'user' to 'player'
+          phone: '', // Changed from phone_number to phone
+          role: 'player',
           is_active: true,
           created_at: new Date(),
           updated_at: new Date()
@@ -548,38 +555,47 @@ export const authService = {
           INSERT INTO users (
             user_id, 
             username, 
-            phone_number, 
+            phone, 
             role, 
-            is_active, 
-            created_at, 
-            updated_at, 
-            password_hash,
+            pwd_hash, 
             salt
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ) VALUES ($1, $2, $3, $4, $5, $6)
           RETURNING *
         `;
 
         // Generate a secure random password hash for default profile
         const defaultPasswordHash = await bcrypt.hash(crypto.randomUUID(), 10);
-
+        
         // Generate a secure random salt
         const salt = crypto.randomBytes(16).toString('hex');
 
         const insertResult = await pool.query(insertQuery, [
           defaultProfile.user_id,
           defaultProfile.username,
-          defaultProfile.phone_number,
+          defaultProfile.phone,
           defaultProfile.role,
-          defaultProfile.is_active,
-          defaultProfile.created_at,
-          defaultProfile.updated_at,
           defaultPasswordHash,
-          salt  // Add generated salt
+          salt
+        ]);
+
+        // Also create profile
+        const profileQuery = `
+          INSERT INTO user_profiles (
+            user_id,
+            is_active,
+            updated_at
+          ) VALUES ($1, $2, $3)
+        `;
+
+        await pool.query(profileQuery, [
+          defaultProfile.user_id,
+          true,
+          new Date()
         ]);
 
         return insertResult.rows[0];
       }
-      
+
       const userProfile = userResult.rows[0];
 
       // Get wallet data
@@ -640,63 +656,24 @@ export const authService = {
     }
   },
 
-  async autoActivateUserAccount(userProfile) {
-    // Conditions for automatic activation
-    const shouldAutoActivate = 
-      // Activate developer accounts
-      (userProfile.username === 'developer') ||
-      // Activate accounts with a valid phone number
-      (userProfile.phone_number && userProfile.phone_number.startsWith('+254')) ||
-      // Activate accounts created recently (within last 7 days)
-      (new Date() - new Date(userProfile.created_at) < 7 * 24 * 60 * 60 * 1000);
-
-    if (shouldAutoActivate && !userProfile.is_active) {
-      try {
-        // Activate the user account
-        const activatedProfile = await this.activateUserAccount(userProfile.user_id);
-
-        // Log auto-activation
-        logger.info('USER_AUTO_ACTIVATED', {
-          userId: userProfile.user_id,
-          username: userProfile.username,
-          reason: shouldAutoActivate ? 'Auto-activation criteria met' : 'Unknown'
-        });
-
-        return activatedProfile;
-      } catch (error) {
-        // Log auto-activation failure
-        logger.error('USER_AUTO_ACTIVATION_FAILED', {
-          userId: userProfile.user_id,
-          username: userProfile.username,
-          errorMessage: error.message
-        });
-
-        // Rethrow the error
-        throw error;
-      }
-    }
-
-    // Return original profile if no activation needed
-    return userProfile;
-  },
-
   async updateProfile(userId, updateData) {
     try {
-      const { username, phoneNumber } = updateData;
-      
+      const { username, phone } = updateData;
+
+      // UPDATED column name
       const updateQuery = `
         UPDATE users 
         SET 
           username = COALESCE($1, username), 
-          phone_number = COALESCE($2, phone_number)
+          phone = COALESCE($2, phone)
         WHERE user_id = $3
-        RETURNING user_id, username, phone_number, role
+        RETURNING user_id, username, phone, role
       `;
-      
-      const validationResult = phoneValidator.validate(phoneNumber);
+
+      const validationResult = phoneValidator.validate(phone);
       if (!validationResult.isValid) {
         logger.error('PROFILE_UPDATE_INVALID_PHONE_NUMBER', {
-          originalPhoneNumber: phoneNumber,
+          originalPhoneNumber: phone,
           validationError: validationResult.error,
           supportedFormats: validationResult.supportedFormats
         });
@@ -704,14 +681,14 @@ export const authService = {
       }
 
       const result = await pool.query(updateQuery, [username, validationResult.normalizedNumber, userId]);
-
+      
       if (result.rows.length === 0) {
         throw new Error('User not found');
       }
 
       logger.info('PROFILE_UPDATE_SUCCESS', {
         userId: result.rows[0].user_id,
-        phoneNumber: result.rows[0].phone_number
+        phoneNumber: result.rows[0].phone
       });
 
       return result.rows[0];
@@ -732,7 +709,6 @@ export const authService = {
    */
   async activateUserAccount(userId) {
     const client = await pool.connect();
-
     try {
       // Start transaction
       await client.query('BEGIN');
@@ -767,7 +743,6 @@ export const authService = {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
       logger.error('USER_ACCOUNT_ACTIVATION_FAILED', {
         userId,
         errorMessage: error.message,
@@ -787,7 +762,6 @@ export const authService = {
    */
   async bulkActivateUserAccounts(userIds) {
     const client = await pool.connect();
-
     try {
       // Start transaction
       await client.query('BEGIN');
@@ -821,13 +795,11 @@ export const authService = {
     } catch (error) {
       // Rollback transaction on error
       await client.query('ROLLBACK');
-
       logger.error('BULK_USER_ACCOUNT_ACTIVATION_FAILED', {
         userIds,
         errorMessage: error.message,
         errorStack: error.stack
       });
-
       throw error;
     } finally {
       client.release();
@@ -849,9 +821,9 @@ export const authService = {
         ON CONFLICT (user_id) DO UPDATE 
         SET 
           token = $2, 
-          token_salt = $3,
-          created_at = NOW(),
-          expires_at = NOW() + INTERVAL '7 days',
+          token_salt = $3, 
+          created_at = NOW(), 
+          expires_at = NOW() + INTERVAL '7 days', 
           is_revoked = FALSE`,
         [userId, hashedToken, tokenSalt]
       );
@@ -909,31 +881,29 @@ export const authService = {
           throw new Error('Refresh token is invalid or has been revoked');
         }
 
-        // Retrieve user profile
+        // Retrieve user profile 
         const userProfile = await this.getUserProfile(decoded.userId);
-
         if (!userProfile) {
           throw new Error('User not found');
         }
 
-        // Generate new access token
+        // Generate new access token with correct field names
         const accessToken = jwt.sign(
           {
             user_id: userProfile.user_id,
             username: userProfile.username,
-            phone_number: userProfile.phone_number,
-            is_active: userProfile.is_active || false
+            phone: userProfile.phone,  // Changed from phone_number to phone
+            is_active: userProfile.is_active || false,
+            ver_status: userProfile.ver_status || 'unverified'
           },
-          process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237',
-          { 
-            expiresIn: '15m' 
-          }
+          process.env.JWT_SECRET || '520274659b0b083575095c7f82961352a2bfa4d11c606b8e67c4d48d17be6237', 
+          { expiresIn: '15m' }
         );
 
         // Generate new refresh token
         const newRefreshToken = await this.generateRefreshToken(userProfile.user_id);
 
-        logger.info('ACCESS_TOKEN_REFRESHED', {
+        logger.info('ACCESS_TOKEN_REFRESHED', { 
           userId: userProfile.user_id,
           username: userProfile.username
         });
@@ -960,11 +930,9 @@ export const authService = {
       if (error.name === 'TokenExpiredError') {
         throw new Error('Refresh token expired. Please login again.');
       }
-
       if (error.name === 'JsonWebTokenError') {
         throw new Error('Invalid refresh token. Please login again.');
       }
-
       throw error;
     }
   },

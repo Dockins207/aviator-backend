@@ -75,11 +75,14 @@ router.post('/place-bet',
         autoRequeue
       });
 
+      const betType = autoCashoutAt ? 'auto_cashout' : 'manual_cashout';
+
       // Call betService with the request context
       const result = await betService.placeBet({
         amount: Number(amount),
         autoCashoutAt: autoCashoutAt ? Number(autoCashoutAt) : null,
-        autoRequeue: !!autoRequeue
+        autoRequeue: !!autoRequeue,
+        betType
       }, req);
 
       // Log successful bet placement

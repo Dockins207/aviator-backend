@@ -2,54 +2,59 @@ export class User {
   constructor(
     userId, 
     username, 
-    phoneNumber, 
-    passwordHash, 
+    phone, 
+    pwdHash, 
     salt, 
     role, 
-    verificationStatus, 
+    verStatus, 
     isActive, 
     profilePictureUrl, 
-    referralCode, 
-    referredBy, 
+    refCode, 
+    refBy, 
     lastLogin, 
-    lastPasswordChange, 
+    lastPwdChange, 
     createdAt, 
     updatedAt
   ) {
     this.userId = userId;
     this.username = username;
-    this.phoneNumber = phoneNumber;
-    this.passwordHash = passwordHash;
+    this.phone = phone;
+    this.pwdHash = pwdHash;
     this.salt = salt;
     this.role = role;
-    this.verificationStatus = verificationStatus;
+    this.verStatus = verStatus;
     this.isActive = isActive;
     this.profilePictureUrl = profilePictureUrl;
-    this.referralCode = referralCode;
-    this.referredBy = referredBy;
+    this.refCode = refCode;
+    this.refBy = refBy;
     this.lastLogin = lastLogin;
-    this.lastPasswordChange = lastPasswordChange;
+    this.lastPwdChange = lastPwdChange;
     this.createdAt = createdAt;
     this.updatedAt = updatedAt;
   }
 
-  static fromRow(row) {
+  static fromRow(userRow, profileRow = null) {
+    // Handle case where data comes from joined query
+    if (profileRow === null && userRow.profile_picture_url !== undefined) {
+      profileRow = userRow;
+    }
+    
     return new User(
-      row.user_id,
-      row.username,
-      row.phone_number,
-      row.password_hash,
-      row.salt,
-      row.role,
-      row.verification_status,
-      row.is_active,
-      row.profile_picture_url,
-      row.referral_code,
-      row.referred_by,
-      row.last_login,
-      row.last_password_change,
-      row.created_at,
-      row.updated_at
+      userRow.user_id,
+      userRow.username,
+      userRow.phone,
+      userRow.pwd_hash,
+      userRow.salt,
+      userRow.role,
+      profileRow?.ver_status || 'unverified',
+      profileRow?.is_active !== undefined ? profileRow.is_active : true,
+      profileRow?.profile_picture_url || null,
+      userRow.ref_code,
+      userRow.ref_by,
+      profileRow?.last_login || null,
+      profileRow?.last_pwd_change || null,
+      userRow.created_at,
+      profileRow?.updated_at || userRow.created_at
     );
   }
 
@@ -57,13 +62,13 @@ export class User {
     return {
       userId: this.userId,
       username: this.username,
-      phoneNumber: this.phoneNumber,
+      phone: this.phone,
       role: this.role,
-      verificationStatus: this.verificationStatus,
+      verStatus: this.verStatus,
       isActive: this.isActive,
       profilePictureUrl: this.profilePictureUrl,
-      referralCode: this.referralCode,
-      referredBy: this.referredBy,
+      refCode: this.refCode,
+      refBy: this.refBy,
       lastLogin: this.lastLogin,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt

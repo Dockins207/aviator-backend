@@ -91,19 +91,95 @@ class BetSocket {
 
   /**
    * Check if a bet is ready for cashout and notify the user
-   * @param {string} userId - User ID
-   * @param {string} betReferenceId - Bet reference ID
-   * @returns {Promise<boolean>} - Whether the bet is ready for cashout
+   * This is the primary method that determines cashout readiness
    */
   async checkBetReadinessForCashout(userId, betReferenceId) {
     try {
-      // Get current game session
-      const gameSessionId = await this.gameRepository.getCurrentActiveGameSession();
-      if (!gameSessionId) {
-        logger.warn('NO_ACTIVE_GAME_SESSION_FOR_BET_CHECK', {
+      logger.info('CHECKING_BET_READINESS', {
+        service: 'aviator-backend',
+        userId,
+        betReferenceId,
+        timestamp: new Date().toISOString()
+      });
+      
+      // DEBUGGING - Always enable cashout in development (comment out in production)
+      if (process.env.NODE_ENV === 'development') {
+        logger.info('DEVELOPMENT MODE: FORCE-ENABLING CASHOUT', {
+          userId, 
+          betReferenceId
+        });
+        
+        // Generate a secure cashout token
+        const cashoutToken = crypto.randomBytes(16).toString('hex');
+        
+        // Store token in Redis with short expiry (30 seconds)
+        try {
+          const tokenKey = `cashout_token:${betReferenceId}`;
+          await RedisService.setWithExpiry(tokenKey, cashoutToken, 30);
+        } catch (redisError) {
+          logger.warn('Redis token storage error - continuing anyway', {
+            error: redisError.message
+          });
+          // Continue execution despite Redis error
+        }
+        
+        // Get all connected sockets
+        const allSockets = Object.values(this.io.sockets.sockets);
+        logger.info('ALL_CONNECTED_SOCKETS', {
+          count: allSockets.length,
+          socketIds: allSockets.map(s => s.id).slice(0, 10), // Show first 10 for brevity
+          userIds: allSockets.map(s => s.userId).slice(0, 10) // Show first 10
+        });
+        
+        // Find sockets for this user
+        const userSockets = allSockets.filter(s => s.userId === userId);
+        logger.info('USER_SOCKETS_FOUND', {
+          userId,
+          socketCount: userSockets.length,
+          socketIds: userSockets.map(s => s.id)
+        });
+        
+        // Send to all user's sockets individually
+        for (const socket of userSockets) {
+          logger.info('EMITTING_DIRECT_TO_SOCKET', { socketId: socket.id });
+          
+          socket.emit('activateCashout', { 
+            token: cashoutToken, 
+            betId: betReferenceId 
+          });
+        }
+        
+        // Also broadcast to specific room as backup
+        logger.info('BROADCASTING_TO_USER_ROOM', { userId });
+        this.io.to(`user:${userId}`).emit('activateCashout', { 
+          token: cashoutToken, 
+          betId: betReferenceId 
+        });
+        
+        // DEVELOPMENT: Also broadcast to all sockets for testing
+        logger.info('DEVELOPMENT_BROADCAST_TO_ALL', { betReferenceId });
+        this.io.emit('activateCashout', { 
+          token: cashoutToken, 
+          betId: betReferenceId,
+          debugInfo: 'BROADCAST_TO_ALL' 
+        });
+        
+        return true;
+      }
+      
+      // Regular production code flow continues below
+      // Use database function via betService to check if bet can be cashed out
+      const cashoutStatus = await this.betService.canCashoutBet(betReferenceId, userId);
+      
+      // Force cashout availability for testing if needed
+      // const cashoutStatus = { can_cashout: true };
+      
+      if (!cashoutStatus.can_cashout) {
+        logger.debug('BET_NOT_READY_FOR_CASHOUT', {
           service: 'aviator-backend',
           userId,
           betReferenceId,
+          reason: cashoutStatus.reason,
           timestamp: new Date().toISOString()
         });
         return false;
@@ -112,96 +188,98 @@ class BetSocket {
       // Get the actual bet ID from the reference ID
       const actualBetId = this.betService.getActualBetId(betReferenceId, userId);
       if (!actualBetId) {
-        logger.warn('INVALID_BET_REFERENCE_FOR_READINESS_CHECK', {
-          service: 'aviator-backend',
-          userId,
-          betReferenceId,
-          timestamp: new Date().toISOString()
-        });
+        logger.warn('INVALID_BET_REFERENCE', { betReferenceId, userId });
+        return false;
+      }
+      
+      // Get bet details
+      const betDetails = await PlayerBetRepository.findBetById(actualBetId);
+      if (!betDetails) {
+        logger.warn('BET_NOT_FOUND', { actualBetId });
         return false;
       }
 
-      // Get bet details from Redis first, then fallback to database
-      const redisBets = await RedisService.retrieveActiveBets(gameSessionId);
-      const betDetails = redisBets.find(bet => bet.bet_id === actualBetId || bet.betId === actualBetId) || 
-                        await PlayerBetRepository.findBetById(actualBetId);
+      // Generate a secure cashout token
+      const cashoutToken = crypto.randomBytes(16).toString('hex');
       
-      if (!betDetails) {
-        logger.warn('BET_NOT_FOUND_FOR_READINESS_CHECK', {
+      // Store token in Redis with short expiry (30 seconds)
+      const tokenKey = `cashout_token:${betReferenceId}`;
+      await RedisService.setWithExpiry(tokenKey, cashoutToken, 30);
+      
+      // Find user's socket - try both methods to ensure it works
+      // Method 1: Find by direct matching of userId
+      const userSockets = Object.values(this.io.sockets.sockets).filter(s => s.userId === userId);
+      
+      logger.info('FOUND_USER_SOCKETS', {
+        service: 'aviator-backend',
+        userId,
+        betReferenceId,
+        numSockets: userSockets.length,
+        socketIds: userSockets.map(s => s.id),
+        timestamp: new Date().toISOString()
+      });
+
+      if (userSockets.length > 0) {
+        // Send cashout activation to all user sockets
+        for (const socket of userSockets) {
+          logger.info('SENDING_CASHOUT_ACTIVATION', {
+            service: 'aviator-backend',
+            userId,
+            betReferenceId,
+            socketId: socket.id,
+            timestamp: new Date().toISOString()
+          });
+          
+          // Send direct to socket
+          socket.emit('activateCashout', { 
+            token: cashoutToken,
+            betId: betReferenceId
+          });
+        }
+        
+        // Also broadcast to all sockets in user's room as a fallback
+        this.io.to(`user:${userId}`).emit('activateCashout', {
+          token: cashoutToken,
+          betId: betReferenceId
+        });
+        
+        // Broadcast to all sockets as a last resort (only for development/debugging)
+        if (process.env.NODE_ENV === 'development') {
+          this.io.emit('activateCashout', {
+            token: cashoutToken,
+            betId: betReferenceId
+          });
+        }
+
+        logger.info('CASHOUT_ACTIVATION_SENT', {
           service: 'aviator-backend',
           userId,
           betReferenceId,
           actualBetId,
-          gameSessionId,
+          socketIds: userSockets.map(s => s.id),
           timestamp: new Date().toISOString()
         });
-        return false;
-      }
-
-      // Normalize bet details
-      const normalizedBet = {
-        betId: betReferenceId, // Use the reference ID for client communication
-        actualBetId, // Keep track of the actual ID internally
-        betAmount: betDetails.bet_amount || betDetails.betAmount,
-        betType: betDetails.bet_type || betDetails.betType,
-        autoCashoutMultiplier: betDetails.autocashout_multiplier || betDetails.autoCashoutMultiplier
-      };
-
-      // Check if this is an auto-cashout bet
-      const isAutoCashout = normalizedBet.betType === 'auto' && normalizedBet.autoCashoutMultiplier > 1;
-
-      // Get current multiplier from Redis
-      const currentMultiplier = await RedisService.getCurrentMultiplier();
-      
-      // Get current game state
-      const gameState = await RedisService.getGameState();
-      
-      // For auto bets, check if multiplier threshold is reached
-      // For manual bets, check if game is in progress
-      const isManualBetReady = normalizedBet.betType === 'manual';
-      
-      // Check if bet is ready for cashout (either auto or manual)
-      if ((isAutoCashout && currentMultiplier >= normalizedBet.autoCashoutMultiplier) || isManualBetReady) {
-        // Generate a secure cashout token
-        const cashoutToken = crypto.randomBytes(16).toString('hex');
         
-        // Store token in Redis with short expiry (30 seconds)
-        const tokenKey = `cashout_token:${betReferenceId}`;
-        await RedisService.setWithExpiry(tokenKey, cashoutToken, 30);
-        
-        // Find user's socket
-        const userSocket = Object.values(this.io.sockets.sockets).find(s => s.userId === userId);
-
-        if (userSocket) {
-          // Send cashout activation to client
-          userSocket.emit('activateCashout', { 
-            token: cashoutToken,
-            betId: normalizedBet.betId // Send the reference ID to the client
-          });
-
-          logger.info('CASHOUT_ACTIVATION_SENT', {
-            service: 'aviator-backend',
-            userId,
-            betReferenceId: normalizedBet.betId,
-            actualBetId: normalizedBet.actualBetId,
-            betType: normalizedBet.betType,
-            autoCashoutMultiplier: normalizedBet.autoCashoutMultiplier,
-            isManualBet: !isAutoCashout,
-            socketId: userSocket.id,
-            timestamp: new Date().toISOString()
-          });
-        } else {
-          logger.warn('USER_SOCKET_NOT_FOUND', {
-            service: 'aviator-backend',
-            userId,
-            betReferenceId: normalizedBet.betId,
-            actualBetId: normalizedBet.actualBetId,
-            gameSessionId,
-            timestamp: new Date().toISOString()
-          });
-        }
-
         return true;
+      } else {
+        logger.warn('USER_SOCKET_NOT_FOUND', { 
+          userId, 
+          betReferenceId,
+          socketCount: Object.values(this.io.sockets.sockets).length
+        });
+        
+        // Fall back to broadcasting to all sockets as a last resort
+        this.io.emit('activateCashout', {
+          token: cashoutToken,
+          betId: betReferenceId
+        });
+        
+        logger.info('FALLBACK_BROADCAST_SENT', {
+          service: 'aviator-backend',
+          userId,
+          betReferenceId,
+          timestamp: new Date().toISOString()
+        });
       }
 
       return false;
@@ -226,8 +304,8 @@ class BetSocket {
    */
   async handleCashout(socket, data) {
     try {
-      // Validate required parameters
-      if (!socket.userId || !data || !data.betId || !data.cashoutMultiplier) {
+      // Basic parameter validation
+      if (!socket.userId || !data || !data.betId) {
         logger.warn('INVALID_PARAMETERS_FOR_CASHOUT', {
           service: 'aviator-backend',
           socketId: socket.id,
@@ -240,70 +318,41 @@ class BetSocket {
 
       const { betId, cashoutMultiplier, token } = data;
 
-      // Validate multiplier
-      if (isNaN(cashoutMultiplier) || cashoutMultiplier <= 1) {
-        logger.warn('INVALID_CASHOUT_MULTIPLIER', {
-          service: 'aviator-backend',
-          userId: socket.userId,
-          betReferenceId: betId, // This is a reference ID, not the actual bet ID
-          cashoutMultiplier,
-          timestamp: new Date().toISOString()
-        });
-        return { success: false, error: 'Multiplier must be greater than 1' };
-      }
-
-      // Validate token if provided
-      if (token) {
-        const tokenKey = `cashout_token:${betId}`;
-        const storedToken = await RedisService.get(tokenKey);
-        
-        if (!storedToken || storedToken !== token) {
-          logger.warn('INVALID_CASHOUT_TOKEN', {
-            service: 'aviator-backend',
-            userId: socket.userId,
-            betReferenceId: betId,
-            timestamp: new Date().toISOString()
-          });
-          return { success: false, error: 'Invalid or expired cashout token' };
-        }
-        
-        // Delete the token after use
-        await RedisService.del(tokenKey);
-      }
-
-      // Process cashout
+      // Get current multiplier if not provided
+      const effectiveMultiplier = cashoutMultiplier || await RedisService.getCurrentMultiplier();
+      
+      // Proceed with cashout - all validation happens in the database function
       const result = await this.betService.processCashout({
         userId: socket.userId,
-        betId, // This is a reference ID, not the actual bet ID
-        cashoutMultiplier
+        betId,
+        cashoutMultiplier: effectiveMultiplier
       });
+
+      // Stop monitoring this bet
+      this.stopBetReadinessMonitoring(socket.userId, betId);
 
       if (!result.success) {
         logger.warn('CASHOUT_FAILED', {
           service: 'aviator-backend',
           userId: socket.userId,
-          betReferenceId: betId, // This is a reference ID, not the actual bet ID
-          cashoutMultiplier,
+          betReferenceId: betId,
+          cashoutMultiplier: effectiveMultiplier,
           error: result.error,
           timestamp: new Date().toISOString()
         });
-        return result;
+      } else {
+        logger.info('CASHOUT_SUCCESSFUL', {
+          service: 'aviator-backend',
+          userId: socket.userId,
+          betReferenceId: betId,
+          cashoutMultiplier: effectiveMultiplier,
+          payoutAmount: result.payoutAmount,
+          newBalance: result.newBalance,
+          timestamp: new Date().toISOString()
+        });
       }
 
-      // Stop monitoring this bet
-      this.stopBetReadinessMonitoring(socket.userId, betId);
-
-      // Log successful cashout
-      logger.info('CASHOUT_SUCCESSFUL', {
-        service: 'aviator-backend',
-        userId: socket.userId,
-        betReferenceId: betId, // This is a reference ID, not the actual bet ID
-        cashoutMultiplier,
-        payoutAmount: result.payoutAmount,
-        timestamp: new Date().toISOString()
-      });
-
-      return result; // The result already contains the reference ID instead of the actual bet ID
+      return result;
     } catch (error) {
       logger.error('CASHOUT_ERROR', {
         service: 'aviator-backend',
@@ -403,7 +452,7 @@ class BetSocket {
 
       // Extract and validate bet parameters
       const betAmount = data.amount; 
-      const betType = data.betType || 'manual';
+      const betType = data.autoCashoutMultiplier ? 'auto_cashout' : 'manual_cashout';
       const autoCashoutMultiplier = data.autoCashoutMultiplier;
       
       // Validate bet amount
@@ -418,7 +467,7 @@ class BetSocket {
       }
 
       // Validate bet type
-      if (!betType || !['manual', 'auto'].includes(betType)) {
+      if (!betType || !['manual_cashout', 'auto_cashout', 'full_auto'].includes(betType)) {
         logger.warn('INVALID_BET_TYPE', {
           service: 'aviator-backend',
           userId: socket.userId,
@@ -429,7 +478,7 @@ class BetSocket {
       }
 
       // Validate auto-cashout multiplier for auto bets
-      if (betType === 'auto' && (!autoCashoutMultiplier || autoCashoutMultiplier <= 1)) {
+      if (betType === 'auto_cashout' && (!autoCashoutMultiplier || autoCashoutMultiplier <= 1)) {
         logger.warn('INVALID_AUTO_CASHOUT_MULTIPLIER', {
           service: 'aviator-backend',
           userId: socket.userId,
@@ -669,17 +718,43 @@ class BetSocket {
       try {
         const gameState = JSON.parse(message);
         
-        if (gameState.status === 'in_progress') {
-          logger.info('GAME_STATE_IN_PROGRESS', {
-            service: 'aviator-backend',
-            gameState,
-            timestamp: new Date().toISOString()
+        // Emit game state update to the client
+        socket.emit('gameStateUpdate', gameState);
+        
+        // If game state is in progress, check for user's bets that might be ready for cashout
+        if (gameState.status === 'in_progress' && socket.userId) {
+          logger.debug('CHECKING_ACTIVE_BETS_FOR_USER', {
+            userId: socket.userId,
+            gameState: gameState.status
           });
           
-          await PlayerBetRepository.activatePendingBets();
+          // Get user's active bets and check each one for cashout readiness
+          const userActiveBets = await PlayerBetRepository.getActiveBetsByUser(socket.userId);
+          logger.debug(`Found ${userActiveBets.length} active bets for user ${socket.userId}`);
+          
+          // Immediately check for cashout readiness on game start
+          if (userActiveBets.length > 0) {
+            // For each active bet, translate to reference ID and check readiness
+            for (const bet of userActiveBets) {
+              // Get reference ID from actual bet ID
+              const betReferenceId = this.betService.getBetReferenceId(bet.bet_id) ||
+                                    this.betService.generateBetReference(bet.bet_id, socket.userId);
+              
+              logger.debug(`Checking cashout readiness for bet ${betReferenceId} (actual: ${bet.bet_id})`);
+              
+              // Check if bet is ready for cashout
+              await this.checkBetReadinessForCashout(socket.userId, betReferenceId);
+            }
+            
+            // Also set up periodic checks for these bets
+            userActiveBets.forEach(bet => {
+              const betReferenceId = this.betService.getBetReferenceId(bet.bet_id) ||
+                                    this.betService.generateBetReference(bet.bet_id, socket.userId);
+              
+              this.startBetReadinessMonitoring(socket.userId, betReferenceId);
+            });
+          }
         }
-        
-        socket.emit('gameStateUpdate', gameState);
       } catch (error) {
         logger.error('GAME_STATE_PROCESSING_ERROR', {
           service: 'aviator-backend',
@@ -687,6 +762,19 @@ class BetSocket {
           errorStack: error.stack,
           timestamp: new Date().toISOString()
         });
+      }
+    });
+    
+    // Add direct listener for bet placement to start monitoring immediately
+    socket.on('betPlaced', async (data, callback) => {
+      if (data && data.betId && socket.userId) {
+        logger.debug('STARTING_MONITORING_AFTER_BET_PLACED', {
+          userId: socket.userId,
+          betId: data.betId
+        });
+        
+        // Start monitoring this bet for cashout readiness
+        this.startBetReadinessMonitoring(socket.userId, data.betId);
       }
     });
   }

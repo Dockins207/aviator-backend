@@ -5,85 +5,107 @@ import bcrypt from 'bcryptjs';
 
 export class UserRepository {
   // Create a new user
-  static async createUser(username, phoneNumber, password, role = 'player') {
-    // Generate salt and hashed password
-    const saltRounds = 10;
-    const salt = await bcrypt.genSalt(saltRounds);
-    const hashedPassword = await bcrypt.hash(password, salt);
+  static async createUser(username, phone, password, role = 'player') {
+    const client = await pool.connect();
     
-    const query = `
-      INSERT INTO users (
-        username, 
-        phone_number, 
-        password_hash, 
-        salt,
-        role,
-        verification_status,
-        is_active,
-        referral_code
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-      RETURNING *
-    `;
-
     try {
-      const referralCode = this.generateReferralCode();
+      // Begin transaction
+      await client.query('BEGIN');
       
-      const result = await pool.query(query, [
+      // Generate salt and hashed password
+      const saltRounds = 10;
+      const salt = await bcrypt.genSalt(saltRounds);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      
+      // Insert into users table
+      const userQuery = `
+        INSERT INTO users (
+          username, 
+          phone, 
+          pwd_hash, 
+          salt,
+          role
+        ) VALUES ($1, $2, $3, $4, $5) 
+        RETURNING *
+      `;
+
+      const userResult = await client.query(userQuery, [
         username, 
-        phoneNumber, 
+        phone, 
         hashedPassword,
         salt,
-        role,
-        'unverified',
-        true,
-        referralCode
+        role
       ]);
+      
+      const userId = userResult.rows[0].user_id;
+      
+      // Insert into user_profiles table
+      const profileQuery = `
+        INSERT INTO user_profiles (
+          user_id,
+          ver_status,
+          is_active
+        ) VALUES ($1, $2, $3)
+        RETURNING *
+      `;
+      
+      const profileResult = await client.query(profileQuery, [
+        userId,
+        'unverified',
+        true
+      ]);
+      
+      // Commit transaction
+      await client.query('COMMIT');
 
       logger.info('USER_CREATED', {
-        userId: result.rows[0].user_id,
+        userId: userId,
         username,
-        phoneNumber,
-        role
+        phone
       });
 
-      return result.rows.length > 0 ? User.fromRow(result.rows[0]) : null;
+      return userResult.rows.length > 0 ? User.fromRow(userResult.rows[0], profileResult.rows[0]) : null;
     } catch (error) {
+      await client.query('ROLLBACK');
       logger.error('Error creating user', { 
         username, 
-        phoneNumber, 
+        phone, 
         errorMessage: error.message 
       });
       throw error;
+    } finally {
+      client.release();
     }
   }
 
   // Find user by phone number
   static async findByPhoneNumber(phoneNumber) {
     // Normalize phone number to remove non-digit characters
-    const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
+    const normalizedPhone = phoneNumber.replace(/[^\d]/g, '');
     
     // Try different phone number formats
-    const phoneNumberVariants = [
-      normalizedPhoneNumber,
-      `+${normalizedPhoneNumber}`,
-      `0${normalizedPhoneNumber.slice(-9)}`,
-      `254${normalizedPhoneNumber.slice(-9)}`
+    const phoneVariants = [
+      normalizedPhone,
+      `+${normalizedPhone}`,
+      `0${normalizedPhone.slice(-9)}`,
+      `254${normalizedPhone.slice(-9)}`
     ];
 
     const query = `
-      SELECT * FROM users 
-      WHERE phone_number = ANY($1)
+      SELECT u.*, p.* FROM users u
+      LEFT JOIN user_profiles p ON u.user_id = p.user_id
+      WHERE u.phone = ANY($1)
     `;
 
     try {
       logger.debug('USER_LOOKUP_QUERY', {
         query: query,
         phoneNumber: phoneNumber,
-        normalizedPhoneNumber: normalizedPhoneNumber,
-        phoneNumberVariants: phoneNumberVariants
+        normalizedPhone: normalizedPhone,
+        phoneVariants: phoneVariants
       });
 
-      const result = await pool.query(query, [phoneNumberVariants]);
+      const result = await pool.query(query, [phoneVariants]);
       
       logger.debug('USER_LOOKUP', {
         phoneNumber,
@@ -91,10 +113,10 @@ export class UserRepository {
         userDetails: result.rows.map(row => ({
           userId: row.user_id,
           username: row.username,
-          phoneNumber: row.phone_number,
+          phone: row.phone,
           role: row.role,
           isActive: row.is_active,
-          verificationStatus: row.verification_status
+          verStatus: row.ver_status
         }))
       });
 
@@ -102,46 +124,26 @@ export class UserRepository {
     } catch (error) {
       logger.error('Error finding user by phone number', { 
         phoneNumber, 
-        normalizedPhoneNumber,
-        phoneNumberVariants,
+        normalizedPhone,
+        phoneVariants,
         errorMessage: error.message,
         errorCode: error.code,
         errorStack: error.stack
       });
       
-      // Log additional database connection details
-      try {
-        const client = await pool.connect();
-        const tableQuery = `
-          SELECT column_name 
-          FROM information_schema.columns 
-          WHERE table_name = 'users'
-        `;
-        const tableResult = await client.query(tableQuery);
-        client.release();
-
-        logger.debug('USERS_TABLE_COLUMNS', {
-          columns: tableResult.rows.map(row => row.column_name)
-        });
-      } catch (connectionError) {
-        logger.error('Error checking table columns', {
-          errorMessage: connectionError.message
-        });
-      }
-
       throw error;
     }
   }
 
   // Authenticate user
-  static async authenticate(phoneNumber, password) {
+  static async authenticate(phone, password) {
     try {
-      const user = await this.findByPhoneNumber(phoneNumber);
+      const user = await this.findByPhoneNumber(phone);
       
       if (!user) return null;
 
       // Compare password using bcrypt
-      const isMatch = await bcrypt.compare(password, user.passwordHash);
+      const isMatch = await bcrypt.compare(password, user.pwdHash);
       
       if (isMatch) {
         // Update last login
@@ -152,7 +154,7 @@ export class UserRepository {
       return null;
     } catch (error) {
       logger.error('Authentication Error', {
-        phoneNumber,
+        phone,
         errorMessage: error.message
       });
       throw error;
@@ -162,7 +164,7 @@ export class UserRepository {
   // Update last login timestamp
   static async updateLastLogin(userId) {
     const query = `
-      UPDATE users 
+      UPDATE user_profiles 
       SET last_login = CURRENT_TIMESTAMP 
       WHERE user_id = $1
     `;
@@ -189,8 +191,9 @@ export class UserRepository {
   // Find user by ID
   static async findById(userId) {
     const query = `
-      SELECT * FROM users 
-      WHERE user_id = $1
+      SELECT u.*, p.* FROM users u
+      LEFT JOIN user_profiles p ON u.user_id = p.user_id
+      WHERE u.user_id = $1
     `;
 
     try {

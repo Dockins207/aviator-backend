@@ -52,14 +52,15 @@ export const authMiddleware = {
       // Use shared token validation
       const decoded = await validateToken(token);
 
-      // Set user details from token
+      // Set user details from token - updated for new schema
       req.user = {
         user_id: decoded.user_id,
         username: decoded.username,
         role: decoded.role,
         roles: decoded.roles || [],
-        phone_number: decoded.phone_number,
-        is_active: decoded.is_active
+        phone: decoded.phone,
+        is_active: decoded.is_active,
+        ver_status: decoded.ver_status
       };
 
       req.token = token;

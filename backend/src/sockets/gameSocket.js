@@ -76,7 +76,11 @@ class GameSocket {
       
       // Get user profile
       try {
-        const user = await authService.getUserProfile(decoded.userId);
+        const userId = parseInt(decoded.userId, 10);
+        if (isNaN(userId)) {
+          throw new Error(`Invalid user ID: "${decoded.userId}"`);
+        }
+        const user = await authService.getUserProfile(userId);
         socket.user = user;
       } catch (profileError) {
         logger.warn('User profile fetch failed, using token data', {

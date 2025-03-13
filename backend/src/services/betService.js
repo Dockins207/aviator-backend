@@ -27,7 +27,8 @@ class BetService {
   async placeBet(betDetails) {
     try {
       // Validate bet details
-      const { userId, betAmount, betType, autoCashoutMultiplier, gameSessionId } = betDetails;
+      const { userId, betAmount, autoCashoutMultiplier, gameSessionId } = betDetails;
+      const betType = betDetails.autoCashoutMultiplier ? 'auto_cashout' : 'manual_cashout';
       
       // Validate bet amount
       if (!betAmount || isNaN(betAmount) || betAmount < this.MIN_BET_AMOUNT || betAmount > this.MAX_BET_AMOUNT) {
@@ -38,7 +39,7 @@ class BetService {
       }
 
       // Validate auto-cashout multiplier for auto bets
-      if (betType === 'auto' && (!autoCashoutMultiplier || autoCashoutMultiplier <= 1)) {
+      if (betType === 'auto_cashout' && (!autoCashoutMultiplier || autoCashoutMultiplier <= 1)) {
         return { 
           success: false, 
           error: 'Auto-cashout multiplier must be greater than 1' 
@@ -50,7 +51,7 @@ class BetService {
         userId,
         betAmount,
         autocashoutMultiplier: autoCashoutMultiplier,
-        betType: betType || 'manual'
+        betType
       });
 
       if (!result || !result.bet_id) {
@@ -137,13 +138,20 @@ class BetService {
       const actualBetId = this.getActualBetId(betId, userId);
       
       if (!actualBetId) {
+        logger.warn('CASHOUT_INVALID_REFERENCE_ID', {
+          service: 'aviator-backend',
+          userId,
+          betReferenceId: betId,
+          timestamp: new Date().toISOString()
+        });
+        
         return {
           success: false,
-          error: 'Invalid bet reference'
+          error: `Invalid bet reference ID: ${betId}`
         };
       }
 
-      // Pass to repository and let the database handle all validation
+      // Call the repository method that uses the database function
       const result = await PlayerBetRepository.cashoutBet({
         betId: actualBetId,
         userId,
@@ -153,6 +161,15 @@ class BetService {
       const processingTime = performance.now() - startTime;
 
       if (!result.success) {
+        logger.warn('CASHOUT_FAILED', {
+          service: 'aviator-backend',
+          userId,
+          betReferenceId: betId,
+          actualBetId,
+          reason: result.message,
+          timestamp: new Date().toISOString()
+        });
+
         return {
           success: false,
           error: result.message || 'Cashout failed',
@@ -180,6 +197,72 @@ class BetService {
         success: false,
         error: 'Failed to process cashout'
       };
+    }
+  }
+
+  /**
+   * Check if a bet can be cashed out
+   * @param {string} betReferenceId - Bet reference ID 
+   * @param {string} userId - User ID
+   * @returns {Promise<Object>} - Cashout status
+   */
+  async canCashoutBet(betReferenceId, userId) {
+    try {
+      const actualBetId = this.getActualBetId(betReferenceId, userId);
+      
+      if (!actualBetId) {
+        logger.warn('CASHOUT_CHECK_INVALID_REFERENCE', {
+          service: 'aviator-backend',
+          betReferenceId,
+          userId,
+          timestamp: new Date().toISOString()
+        });
+        return { can_cashout: false, reason: 'Invalid bet reference' };
+      }
+      
+      logger.info('CASHOUT_CHECK', {
+        service: 'aviator-backend',
+        betReferenceId,
+        actualBetId,
+        userId,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Use database function via repository
+      const result = await PlayerBetRepository.canCashoutBet(actualBetId, userId);
+      
+      // Add more detailed logging
+      if (result.can_cashout) {
+        logger.info('CASHOUT_AVAILABLE', {
+          service: 'aviator-backend',
+          betReferenceId,
+          actualBetId,
+          userId,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        logger.info('CASHOUT_UNAVAILABLE', {
+          service: 'aviator-backend',
+          betReferenceId,
+          actualBetId,
+          userId,
+          reason: result.reason,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      logger.error('CASHOUT_STATUS_CHECK_ERROR', {
+        service: 'aviator-backend',
+        betReferenceId,
+        userId,
+        error: error.message,
+        stack: error.stack,
+        timestamp: new Date().toISOString()
+      });
+      
+      return { can_cashout: false, reason: 'Error checking cashout status' };
     }
   }
 

@@ -190,31 +190,7 @@ class GameRepository {
       const redisBetsKey = `game:${gameSessionId}:active_bets`;
 
       if (status === 'in_progress') {
-        // Get and push active bets to Redis when game starts
-        const activeBetsQuery = `
-          SELECT * FROM get_active_bets_for_redis($1)
-        `;
-        
-        const activeBetsResult = await client.query(activeBetsQuery, [gameSessionId]);
-        
-        if (activeBetsResult.rows.length > 0) {
-          const redisData = activeBetsResult.rows.map(bet => ({
-            betId: bet.bet_id,
-            userId: bet.user_id,
-            betAmount: bet.bet_amount,
-            autoCashoutMultiplier: bet.autocashout_multiplier,
-            gameSessionId: bet.game_session_id,
-            status: bet.status
-          }));
-
-          await redisClient.set(redisBetsKey, JSON.stringify(redisData));
-
-          logger.info('ACTIVE_BETS_PUSHED_TO_REDIS', {
-            service: 'aviator-backend',
-            gameSessionId,
-            betCount: redisData.length
-          });
-        }
+        // Remove the code that references get_active_bets_for_redis
       } else if (status === 'completed') {
         // Clear Redis data when game ends
         await redisClient.del(redisBetsKey);

@@ -1847,6 +1847,187 @@ export class WalletRepository {
       client.release();
     }
   }
+
+  /**
+   * Creates a new wallet for a user
+   * @param {string|number} userId - User ID to create wallet for
+   * @returns {Promise<Object>} Created wallet object
+   */
+  static async createWallet(userId) {
+    const client = await pool.connect();
+    
+    try {
+      // Start transaction
+      await client.query('BEGIN');
+      
+      // Check if wallet already exists
+      const checkQuery = 'SELECT * FROM wallets WHERE user_id = $1';
+      const checkResult = await client.query(checkQuery, [userId]);
+      
+      // If wallet exists, return it
+      if (checkResult.rows.length > 0) {
+        await client.query('COMMIT');
+        logger.info('Wallet already exists for user', { userId });
+        return checkResult.rows[0];
+      }
+      
+      // Generate UUID for wallet
+      const walletId = uuidv4();
+      const referenceId = uuidv4();
+      
+      // Insert wallet with initial values
+      const insertQuery = `
+        INSERT INTO wallets (
+          wallet_id, 
+          reference_id,
+          user_id, 
+          balance, 
+          currency,
+          created_at,
+          updated_at
+        ) 
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *
+      `;
+      
+      const walletResult = await client.query(insertQuery, [
+        walletId,
+        referenceId,
+        userId,
+        0.00, // Initial balance
+        'KSH'  // Default currency
+      ]);
+      
+      // Create initial transaction record
+      const transactionId = uuidv4();
+      const transactionQuery = `
+        INSERT INTO wallet_transactions (
+          transaction_id,
+          user_id,
+          wallet_id,
+          amount,
+          currency,
+          transaction_type,
+          description,
+          status,
+          created_at
+        ) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+      `;
+      
+      await client.query(transactionQuery, [
+        transactionId,
+        userId,
+        walletId,
+        0.00,
+        'KSH',
+        'wallet_creation',
+        'Initial wallet creation',
+        'completed'
+      ]);
+      
+      // Commit transaction
+      await client.query('COMMIT');
+      
+      logger.info('Wallet created successfully', {
+        userId,
+        walletId,
+        referenceId
+      });
+      
+      return walletResult.rows[0];
+    } catch (error) {
+      // Rollback transaction on error
+      await client.query('ROLLBACK');
+      
+      logger.error('Wallet creation failed', {
+        userId,
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorStack: error.stack
+      });
+      
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Add a transaction to a user's wallet
+   * @param {Object} transactionData - Transaction data
+   * @returns {Promise<Object>} Transaction details
+   */
+  static async addTransaction({ userId, walletId, amount, type, description, status = 'completed' }) {
+    const client = await pool.connect();
+    
+    try {
+      // Start transaction
+      await client.query('BEGIN');
+      
+      // Create transaction record
+      const transactionId = uuidv4();
+      const insertQuery = `
+        INSERT INTO wallet_transactions (
+          transaction_id,
+          user_id,
+          wallet_id,
+          amount,
+          currency,
+          transaction_type,
+          description,
+          status,
+          created_at
+        ) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+        RETURNING *
+      `;
+      
+      const result = await client.query(insertQuery, [
+        transactionId,
+        userId,
+        walletId,
+        amount,
+        'KSH', // Default currency
+        type,
+        description,
+        status
+      ]);
+      
+      // Update wallet balance
+      const updateQuery = `
+        UPDATE wallets
+        SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $2
+        RETURNING *
+      `;
+      
+      const walletUpdate = await client.query(updateQuery, [amount, userId]);
+      
+      // Commit transaction
+      await client.query('COMMIT');
+      
+      return {
+        transaction: result.rows[0],
+        wallet: walletUpdate.rows[0]
+      };
+    } catch (error) {
+      // Rollback transaction on error
+      await client.query('ROLLBACK');
+      
+      logger.error('Failed to add transaction', {
+        userId,
+        walletId,
+        amount,
+        type,
+        errorMessage: error.message
+      });
+      
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 export default WalletRepository;
